@@ -35,6 +35,12 @@ pub fn tools() -> Vec<ToolDef> {
             add_mesh,
         ),
         def("duplicate_object", "Copy an object (mesh, transform, parent) under a new name.", false, duplicate_object),
+        def(
+            "array",
+            "Repeat an object's geometry `count` times, each copy offset/rotated/scaled cumulatively from the previous (fences, stairs, columns, radial patterns). By default the copies are merged into the object; with separate=true new objects are created.",
+            false,
+            array,
+        ),
         def("delete_object", "Delete an object. Its children are re-parented to its parent.", false, delete_object),
         def("rename_object", "Rename an object.", false, rename_object),
         def("set_active", "Make an object the active one (the default target of tools that take `object`).", false, set_active),
@@ -153,17 +159,28 @@ fn describe_scene(ctx: &mut Ctx, _: Empty) -> Result<Out> {
     Ok(Out::json(j))
 }
 
+/// Linear float colour back to an sRGB hex string.
 pub fn polly_hex(c: [f32; 4]) -> String {
-    let b = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let enc = |x: f32| {
+        let x = x.clamp(0.0, 1.0);
+        if x <= 0.0031308 { x * 12.92 } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
+    };
+    let b = |x: f32| (enc(x) * 255.0).round() as u8;
     if c[3] >= 0.999 {
         format!("#{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]))
     } else {
-        format!("#{:02x}{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]), b(c[3]))
+        format!("#{:02x}{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]), (c[3].clamp(0.0, 1.0) * 255.0).round() as u8)
     }
 }
 
+/// sRGB 8-bit colour (as the agent writes it) to linear float (as materials,
+/// vertex colours and glTF store it). Alpha stays linear.
 pub fn to_f32(c: [u8; 4]) -> [f32; 4] {
-    c.map(|x| x as f32 / 255.0)
+    let lin = |x: u8| {
+        let s = x as f32 / 255.0;
+        if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    };
+    [lin(c[0]), lin(c[1]), lin(c[2]), c[3] as f32 / 255.0]
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -564,4 +581,69 @@ fn set_background(ctx: &mut Ctx, a: Background) -> Result<Out> {
         Ok(())
     })?;
     Ok(ok("ok"))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ArrayArgs {
+    object: Option<String>,
+    /// Total number of instances including the original (>= 2).
+    count: u32,
+    /// Translation per step (object space).
+    #[serde(default)]
+    offset: [f32; 3],
+    /// Euler XYZ degrees per step, about `pivot`.
+    #[serde(default)]
+    rotation: [f32; 3],
+    /// Pivot for rotation (object space, default origin).
+    #[serde(default)]
+    pivot: [f32; 3],
+    /// Uniform scale factor per step (default 1).
+    scale: Option<f32>,
+    /// Create separate objects instead of merging.
+    #[serde(default)]
+    separate: bool,
+}
+
+fn array(ctx: &mut Ctx, a: ArrayArgs) -> Result<Out> {
+    if !(2..=256).contains(&a.count) {
+        bail!("count must be 2..256");
+    }
+    let id = resolve(&ctx.doc.scene, &a.object)?;
+    let pivot = Vec3::from_array(a.pivot);
+    let step = Mat4::from_translation(Vec3::from_array(a.offset))
+        * Mat4::from_translation(pivot)
+        * Mat4::from_quat(quat_from_euler_degrees(a.rotation))
+        * Mat4::from_scale(Vec3::splat(a.scale.unwrap_or(1.0)))
+        * Mat4::from_translation(-pivot);
+    let created = edit_scene(ctx, "array", |s| {
+        let o = s.object(id)?.clone();
+        let mut m = Mat4::IDENTITY;
+        let mut created = vec![];
+        let mut merged = (*o.mesh).clone();
+        for _ in 1..a.count {
+            m = step * m;
+            let mut copy = (*o.mesh).clone();
+            copy.transform(m);
+            if a.separate {
+                let nid = s.add_object(&o.name, copy);
+                let n = s.object_mut(nid)?;
+                n.transform = o.transform;
+                n.parent = o.parent;
+                created.push(nid);
+            } else {
+                merged.append(&copy);
+            }
+        }
+        if !a.separate {
+            s.object_mut(id)?.mesh = Arc::new(merged);
+        }
+        s.active = Some(id);
+        Ok(created)
+    })?;
+    let s = &ctx.doc.scene;
+    let mut j = object_summary(s, id);
+    if !created.is_empty() {
+        j["created"] = json!(created.iter().map(|c| s.objects[c].name.clone()).collect::<Vec<_>>());
+    }
+    super::view::maybe_preview(ctx, id, Out::json(j))
 }

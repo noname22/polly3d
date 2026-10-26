@@ -78,6 +78,19 @@ fn model_a_crate() {
 }
 
 #[test]
+fn unwrap_cube() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}}));
+    let r = call(&s, "auto_seams", json!({}));
+    assert!(r["seams_marked"].as_u64().unwrap() > 0);
+    let r = call(&s, "unwrap", json!({"texture_size": [64, 64]}));
+    assert!(r["overlapping_faces"].as_array().unwrap().is_empty(), "{r}");
+    assert!(!r["islands"].as_array().unwrap().is_empty());
+    call(&s, "uv_report", json!({}));
+    call(&s, "transform_uvs", json!({"elements": ["f0"], "translate": [0.1, 0.0]}));
+}
+
+#[test]
 fn paint_flow_with_hex_and_palette_colours() {
     let s = server();
     call(&s, "add_primitive", json!({"shape": {"kind": "plane"}}));
@@ -85,21 +98,7 @@ fn paint_flow_with_hex_and_palette_colours() {
     // no uvs yet
     let e = call_err(&s, "fill_faces", json!({"elements": ["all"], "fill": {"type": "solid", "color": "#ff0000"}}));
     assert!(e.contains("UV"), "{e}");
-    // give the plane full-square uvs by hand
-    {
-        let doc = s.doc.lock().unwrap();
-        drop(doc);
-    }
-    let mut doc = s.doc.lock().unwrap();
-    let o = doc.scene.objects.values_mut().next().unwrap();
-    let m = Arc::make_mut(&mut o.mesh);
-    for f in m.faces.values_mut() {
-        let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-        for (c, u) in f.corners.iter_mut().zip(uv) {
-            c.uv = polly_core::glam::Vec2::from_array(u);
-        }
-    }
-    drop(doc);
+    call(&s, "project_uv", json!({"projection": {"method": "per_face"}}));
     let r = call(&s, "fill_faces", json!({"elements": ["all"], "fill": {"type": "checker", "a": "p0", "b": "#ff004d", "size_px": 2}}));
     assert_eq!(r["pixels_changed"], 64);
     call(&s, "draw", json!({"texture": "T", "shape": "line", "from": [0, 0], "to": [7, 7], "color": "white"}));

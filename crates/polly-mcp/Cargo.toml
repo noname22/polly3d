@@ -15,6 +15,9 @@ base64.workspace = true
 polly-export.workspace = true
 tracing.workspace = true
 polly-paint.workspace = true
+polly-uv.workspace = true
+polly-render.workspace = true
+image.workspace = true
 
 [dev-dependencies]
 polly-core.workspace = true
