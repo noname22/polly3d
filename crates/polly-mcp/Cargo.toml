@@ -21,3 +21,5 @@ image.workspace = true
 
 [dev-dependencies]
 polly-core.workspace = true
+base64.workspace = true
+image.workspace = true

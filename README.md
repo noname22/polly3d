@@ -17,6 +17,12 @@ cargo build --release
 ./target/release/polly --project scene.polly
 ```
 
+The viewer is read-only and mirrors every edit live. Controls: left-drag to
+orbit, mouse wheel to zoom, `1`–`4` for the front/right/top/persp views, `W`
+toggles the wireframe, `G` the grid, `S` the selection highlight, `F` cycles the
+texture filter (per-texture / nearest / linear), and `R` resets the camera.
+Closing the window leaves the server running.
+
 Register it with Claude Code:
 
 ```sh

@@ -10,6 +10,8 @@ use polly_mcp::PollyServer;
 use polly_mcp::services::Services;
 use rmcp::ServiceExt;
 
+mod viewer;
+
 struct Args {
     viewer: bool,
     project: Option<std::path::PathBuf>,
@@ -59,16 +61,20 @@ fn main() -> Result<()> {
     };
     if args.viewer {
         // The window event loop must own the main thread; MCP runs on the runtime.
-        let handle = rt.spawn(serve);
-        let _ = handle;
-        tracing::warn!("viewer not available yet");
-        rt.block_on(async { futures_pending().await });
+        // When the client disconnects the whole process exits, window included.
+        rt.spawn(async move {
+            if let Err(e) = serve.await {
+                tracing::error!("mcp server: {e:#}");
+            }
+            std::process::exit(0);
+        });
+        if let Err(e) = viewer::run(doc) {
+            tracing::error!("viewer: {e:#}; continuing without it");
+        }
+        // Window closed: keep serving until the client disconnects.
+        rt.block_on(std::future::pending::<()>());
         Ok(())
     } else {
         rt.block_on(serve)
     }
-}
-
-async fn futures_pending() {
-    std::future::pending::<()>().await
 }

@@ -119,3 +119,53 @@ fn paint_flow_with_hex_and_palette_colours() {
     assert_eq!(call(&s, "describe_scene", json!({}))["textures"].as_array().unwrap().len(), 1);
     std::fs::remove_dir_all(dir).ok();
 }
+
+fn images(r: &CallToolResult) -> Vec<Vec<u8>> {
+    use base64::Engine;
+    r.content
+        .iter()
+        .filter_map(|c| match c {
+            ContentBlock::Image(i) => Some(base64::engine::general_purpose::STANDARD.decode(&i.data).unwrap()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Full agent loop with eyes: model, unwrap, paint by screen coords, look.
+/// Skips when no GPU/software adapter is available.
+#[test]
+fn render_pick_and_paint_stroke() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Box"}));
+    call(&s, "auto_seams", json!({}));
+    call(&s, "unwrap", json!({"texture_size": [32, 32]}));
+    call(&s, "create_texture", json!({"name": "T", "width": 32, "height": 32, "fill": "#808080", "material": "M", "object": "Box"}));
+    let r = s.call("render", json!({"view": "front", "overlays": {"face_ids": true}}));
+    if r.is_error == Some(true) {
+        eprintln!("skipping: {}", text(&r));
+        return;
+    }
+    let img = images(&r);
+    assert_eq!(img.len(), 1);
+    let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::write(out.join("session_front.png"), &img[0]).unwrap();
+    let hit = call(&s, "pick", json!({"x": 256, "y": 256}));
+    assert_eq!(hit["object"], "Box", "{hit}");
+    let miss = call(&s, "pick", json!({"x": 2, "y": 2}));
+    assert!(miss["hit"].is_null());
+    let st = call(&s, "paint_stroke", json!({"points": [[200, 200], [312, 312]], "color": "#ff0000", "radius_px": 1}));
+    assert!(st["pixels_changed"]["T"].as_u64().unwrap() > 5, "{st}");
+    let r = s.call("render", json!({"view": "front", "overlays": {"wireframe": false, "grid": false}, "legend": false}));
+    let img = image::load_from_memory(&images(&r)[0]).unwrap().to_rgba8();
+    std::fs::write(out.join("session_painted.png"), &images(&r)[0]).unwrap();
+    let p = img.get_pixel(256, 256);
+    assert!(p[0] > 150 && p[1] < 80, "stroke should be visible at the image centre, got {p:?}");
+    let sheet = s.call("render_contact_sheet", json!({}));
+    assert_eq!(images(&sheet).len(), 1);
+    call(&s, "pick", json!({"x": 256, "y": 256})); // front tile of the sheet
+    let uv = s.call("render_uv_layout", json!({}));
+    std::fs::write(out.join("session_uv.png"), &images(&uv)[0]).unwrap();
+    call(&s, "set_auto_preview", json!({"size": 128}));
+    let r = s.call("extrude", json!({"elements": ["f3"], "distance": 0.3}));
+    assert_eq!(images(&r).len(), 1);
+}
