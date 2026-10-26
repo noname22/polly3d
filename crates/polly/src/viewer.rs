@@ -44,6 +44,13 @@ enum Cam {
     Orbit { yaw: f32, pitch: f32 },
 }
 
+/// Something clickable in the window.
+#[derive(Clone, PartialEq)]
+enum Target {
+    Back,
+    Tile(String),
+}
+
 #[derive(Clone, PartialEq)]
 enum Mode {
     Overview,
@@ -66,6 +73,8 @@ struct App {
     seen: Option<(u64, Vec<(String, u64)>)>,
     tiles: Vec<TileRect>,
     back: Option<Rect>,
+    /// Target under the pointer when the button went down.
+    armed: Option<Target>,
     drag: Option<(f64, f64)>,
     cursor: (f64, f64),
     error: Option<String>,
@@ -248,24 +257,39 @@ impl App {
         self.zoom = 1.0;
     }
 
-    fn click(&mut self) {
-        let (x, y) = self.cursor;
+    /// The clickable element under the cursor, if any.
+    fn target_at(&self, (x, y): (f64, f64)) -> Option<Target> {
         if let Some(b) = self.back {
             if x >= b.x as f64 && y >= b.y as f64 && x < (b.x + b.w) as f64 && y < (b.y + b.h) as f64 {
-                self.mode = Mode::Overview;
-                self.redraw();
-                return;
+                return Some(Target::Back);
             }
         }
-        if let Some(t) = self.tiles.iter().find(|t| t.contains(x, y)) {
-            self.mode = Mode::Single(t.scene.clone());
-            self.reset_camera();
-            self.redraw();
-            return;
-        }
-        if matches!(self.effective_mode(), Mode::Single(_)) {
+        self.tiles.iter().find(|t| t.contains(x, y)).map(|t| Target::Tile(t.scene.clone()))
+    }
+
+    /// Button down only arms a target (or starts an orbit drag); the target
+    /// fires on release, and only if the pointer is still over it.
+    fn press(&mut self) {
+        self.armed = self.target_at(self.cursor);
+        if self.armed.is_none() && matches!(self.effective_mode(), Mode::Single(_)) {
             self.drag = Some(self.cursor);
         }
+    }
+
+    fn release(&mut self) {
+        self.drag = None;
+        let Some(armed) = self.armed.take() else { return };
+        if self.target_at(self.cursor) != Some(armed.clone()) {
+            return;
+        }
+        match armed {
+            Target::Back => self.mode = Mode::Overview,
+            Target::Tile(scene) => {
+                self.mode = Mode::Single(scene);
+                self.reset_camera();
+            }
+        }
+        self.redraw();
     }
 }
 
@@ -302,8 +326,8 @@ impl ApplicationHandler<ViewerCommand> for App {
             WindowEvent::Resized(_) => self.redraw(),
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
-                ElementState::Pressed => self.click(),
-                ElementState::Released => self.drag = None,
+                ElementState::Pressed => self.press(),
+                ElementState::Released => self.release(),
             },
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
@@ -390,6 +414,7 @@ pub fn run(el: EventLoop<ViewerCommand>, workspace: Arc<Workspace>, services: Ar
         seen: None,
         tiles: vec![],
         back: None,
+        armed: None,
         drag: None,
         cursor: (0.0, 0.0),
         error: None,
