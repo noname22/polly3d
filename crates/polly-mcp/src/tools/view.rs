@@ -60,6 +60,12 @@ pub fn tools() -> Vec<ToolDef> {
             stamp,
         ),
         def(
+            "paint_line",
+            "Paint a line on the model's surface, `width` in world units and continuous across UV seams: through points in the object's space (snapped onto the surface, following its curvature) or through pixels of the last render. Optional outline and dashes (stitching). Good for seams, piping, laces, belts, pocket edges, scars.",
+            false,
+            paint_line,
+        ),
+        def(
             "set_auto_preview",
             "Attach a small perspective preview image to the result of every geometry edit (size in px, 0 = off). Handy while iterating, costs image tokens.",
             false,
@@ -551,6 +557,127 @@ fn stamp(ctx: &mut Ctx, a: Stamp) -> Result<Out> {
     let mut j = json!({"texture": name, "pixels_changed": changed, "center": round3(center)});
     if changed == 0 {
         j["note"] = json!("no texels within the radius; the stamp may be smaller than one texel (increase radius or texture size)");
+    }
+    Ok(Out::json(j))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct PaintLine {
+    /// Points in the object's local space (snapped to the nearest surface)...
+    points: Option<Vec<[f32; 3]>>,
+    /// ...or pixels [x, y] of the last render (all on one object).
+    pixels: Option<Vec<[f32; 2]>>,
+    /// Object for `points` (default: active).
+    object: Option<String>,
+    /// Line width in world units.
+    width: f32,
+    color: Rgba,
+    /// Close the line back to its first point.
+    #[serde(default)]
+    closed: bool,
+    /// Dashes: [dash, gap] lengths in world units (e.g. stitching).
+    dashes: Option<[f32; 2]>,
+    /// Outline colour (drawn inside the edges).
+    outline: Option<Rgba>,
+    /// Outline width in world units (default 20% of the line width).
+    outline_width: Option<f32>,
+    /// Texture (default: the texture of the face under the first point).
+    texture: Option<String>,
+    #[serde(default)]
+    blend: Blend,
+}
+
+fn paint_line(ctx: &mut Ctx, a: PaintLine) -> Result<Out> {
+    if !(a.width > 0.0) {
+        bail!("width must be > 0");
+    }
+    // Waypoints in object space, on the shown (posed) mesh.
+    let (obj, mut way, shown) = match (&a.points, &a.pixels) {
+        (Some(pts), None) => {
+            let s = polly_core::variants::display(&ctx.doc.scene, &[], &BTreeMap::new());
+            let obj = resolve(&ctx.doc.scene, &a.object)?;
+            (obj, pts.iter().map(|p| Vec3::from_array(*p)).collect::<Vec<_>>(), s)
+        }
+        (None, Some(px)) => {
+            let s = last_scene(ctx);
+            let mut obj = None;
+            let mut way = Vec::new();
+            for &[x, y] in px {
+                let (cam, x, y) = camera_at(ctx, x, y)?;
+                let h = polly_render::pick(&s, &cam, x, y).with_context(|| format!("nothing under pixel [{x}, {y}]"))?;
+                if obj.is_some_and(|o| o != h.object) {
+                    bail!("the pixels hit different objects; a line stays on one object");
+                }
+                obj = Some(h.object);
+                way.push(s.world_matrix(h.object).inverse().transform_point3(Vec3::from(h.position)));
+            }
+            (obj.context("no pixels given")?, way, s)
+        }
+        _ => bail!("give either `points` or `pixels`"),
+    };
+    if way.len() < 2 {
+        bail!("a line needs at least two points");
+    }
+    if a.closed {
+        way.push(way[0]);
+    }
+    let mesh = &shown.objects.get(&obj).context("that object is not shown")?.mesh;
+    let bvh = polly_core::bvh::Bvh::new(mesh, polly_core::glam::Mat4::IDENTITY);
+    // Snap onto the surface and refine by snapped midpoints until segments
+    // are short, so the line follows curvature (midpoints of nearby surface
+    // points stay near the surface; chord samples deep inside would jump).
+    let snap = |p: Vec3| -> Result<(Vec3, Vec3, u32)> {
+        let (tri, q, _, _) = bvh.closest_point(p).context("object has no faces")?;
+        let t = bvh.tris[tri];
+        Ok((q, t.normal(), t.face))
+    };
+    let total: f32 = way.windows(2).map(|w| w[0].distance(w[1])).sum();
+    let step = (a.width * 0.5).max(total / 4000.0).max(1e-4);
+    let mut pts = Vec::new();
+    let mut nrm = Vec::new();
+    let first = snap(way[0])?;
+    let first_face = Some(first.2);
+    pts.push(first.0);
+    nrm.push(first.1);
+    for w in way.windows(2) {
+        let end = snap(w[1])?;
+        // Depth-first midpoint refinement between the last point and `end`.
+        let mut stack = vec![end];
+        while let Some(b) = stack.last().copied() {
+            let a0 = *pts.last().unwrap();
+            if a0.distance(b.0) <= step || stack.len() > 24 {
+                pts.push(b.0);
+                nrm.push(b.1);
+                stack.pop();
+            } else {
+                stack.push(snap((a0 + b.0) * 0.5)?);
+            }
+        }
+    }
+    let doc = &ctx.doc.scene;
+    let tid = match &a.texture {
+        Some(t) => doc.resolve_texture(t)?,
+        None => {
+            let f = &doc.objects[&obj].mesh.faces[&first_face.unwrap()];
+            doc.materials.get(&f.material).and_then(|m| m.texture).context("the face there has no texture; pass `texture`")?
+        }
+    };
+    let faces = super::paint::faces_with_texture(doc, obj, tid);
+    let (w, h) = (doc.textures[&tid].width, doc.textures[&tid].height);
+    let map = polly_paint::SurfaceMap::new(mesh, &faces, w, h, 1);
+    let outline = a.outline.map(|c| (c, a.outline_width.unwrap_or(a.width * 0.2)));
+    let dashes = a.dashes.map(|[dash, gap]| polly_paint::Dashes { dash, gap });
+    let mut changed = 0;
+    let name = edit_scene(ctx, "paint line", |s| {
+        let palette = s.textures[&tid].palette.clone().and_then(|n| crate::colors::palette_named(s, &n));
+        let paint = polly_paint::Paint::new(a.color).with_blend(a.blend).with_palette(palette);
+        let t = s.texture_mut(tid)?;
+        changed = polly_paint::surface_line(t, &map, &pts, &nrm, a.width, a.color, outline, dashes, &paint);
+        Ok(t.name.clone())
+    })?;
+    let mut j = json!({"texture": name, "pixels_changed": changed, "length": (total * 1000.0).round() / 1000.0});
+    if changed == 0 {
+        j["note"] = json!("no texels within the line; it may be thinner than one texel (increase width or texture size)");
     }
     Ok(Out::json(j))
 }

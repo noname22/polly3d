@@ -47,7 +47,7 @@ Workflow that works well
    - Tubes (sleeves, legs, torsos): cut where it's least visible with seam_plane (centre back, inner leg) or seam_path through a few waypoint vertices, rather than relying on auto_seams.
 5. Paint: create_texture (optionally palette-locked), assign it through a material, fill_faces / draw / paint_stroke, check render.
    - unwrap/pack_uvs `density` gives important parts more texels ({"head": 2}).
-   - fill_faces with {"type":"noise3d"} for organic surfaces (no seams); stamp for buttons/eyes/rivets sized in metres; paint_stroke "dabs" + "mirror" for symmetric details.
+   - fill_faces with {"type":"noise3d"} for organic surfaces (no seams); stamp for buttons/eyes/rivets sized in metres; paint_line for seams, piping, laces and stitching (width in metres, follows the surface, optional dashes); paint_stroke "dabs" + "mirror" for symmetric details.
    - noise3d picks hard bands of its colours (retro); for subtle cloth/skin mottling use close shades with `smooth: true` and contrast < 1.
    - Finish with bake_shading (ao and/or height) for depth; use dither on palette-locked textures. occluders "scene" uses the default gear loadout; shadows of swappable gear stay in the texture when it is swapped, so bake those textures with occluders that are always present.
 6. save_project, export_glb.
@@ -62,6 +62,7 @@ Rigging & animation (optional)
 - Pose: pose_bone (Euler degrees around the bone's own axes), then key_pose into a clip (create_clip; frames at the clip's fps). Repeat at other frames. Loop regions via update_clip.
   - Which axis and sign? list_bones gives each bone's axes in world terms and which way a positive x/z turn moves its tail; render overlays {"bones":true,"bone_axes":true} draws them.
   - Symmetry: mirror_pose (flip, left_to_right, right_to_left) handles the sign flips between .L and .R. For cycles, key one half and copy_keys it mirrored: a walk = frames 0..12 for one step, copy_keys frames [0,12] to 12 with mirror; frame 24 = frame 0.
+  - Legs and arms: solve_ik puts a foot/hand on a world point (pole = which way the knee/elbow bends), then key_pose. In clips, bake_ik keys a chain onto a target over a frame range; with lock: true the foot stays where it is at the range's first frame (no sliding while the hips move during a stance phase).
   - Clips interpolate smoothly by default; set_interpolation ease (stops at each key) or linear/step per channel. In a looping clip, end on the first key's values at the loop end and the cycle wraps seamlessly.
 - Morphs: begin_morph, move vertices with the normal tools, end_morph; set_morph_weight or key them (key_pose with morphs, or set_key).
 - Check motion with render_animation (a filmstrip) or render {"pose":[{"clip":"walk","frame":6}]}; several clips with weights blend.

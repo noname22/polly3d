@@ -324,6 +324,75 @@ pub fn stamp(
     })
 }
 
+/// Dashes along a [`surface_line`]: `dash` painted, then `gap` skipped (world units).
+#[derive(Debug, Clone, Copy)]
+pub struct Dashes {
+    pub dash: f32,
+    pub gap: f32,
+}
+
+/// A line painted by 3-D distance from a polyline lying on the surface
+/// (`points` with their surface `normals`), `width` world units wide and
+/// continuous across seams. Only texels facing roughly like the nearest line
+/// point are painted, so the line doesn't bleed through thin parts.
+#[allow(clippy::too_many_arguments)]
+pub fn surface_line(
+    tex: &mut Texture,
+    map: &SurfaceMap,
+    points: &[Vec3],
+    normals: &[Vec3],
+    width: f32,
+    color: Rgba,
+    outline: Option<(Rgba, f32)>,
+    dashes: Option<Dashes>,
+    p: &Paint,
+) -> usize {
+    if points.len() < 2 || points.len() != normals.len() {
+        return 0;
+    }
+    let r = width * 0.5;
+    // Arc length at each point (for dashes).
+    let mut arc = vec![0.0f32];
+    for w in points.windows(2) {
+        arc.push(arc.last().unwrap() + w[0].distance(w[1]));
+    }
+    let (lo, hi) = points.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+    let (lo, hi) = (lo - Vec3::splat(r), hi + Vec3::splat(r));
+    apply(tex, &map.mask(), p, |x, y, _| {
+        let s = map.get(x, y)?;
+        if s.pos.cmplt(lo).any() || s.pos.cmpgt(hi).any() {
+            return None;
+        }
+        // Nearest point on the polyline: (distance, arc length, segment).
+        let mut best = (f32::MAX, 0.0, 0);
+        for (i, w) in points.windows(2).enumerate() {
+            let d = w[1] - w[0];
+            let t = ((s.pos - w[0]).dot(d) / d.length_squared().max(1e-12)).clamp(0.0, 1.0);
+            let dist = s.pos.distance(w[0] + d * t);
+            if dist < best.0 {
+                best = (dist, arc[i] + (arc[i + 1] - arc[i]) * t, i);
+            }
+        }
+        let (dist, along, seg) = best;
+        if dist > r {
+            return None;
+        }
+        let n = (normals[seg] + normals[seg + 1]).normalize_or_zero();
+        if n != Vec3::ZERO && s.normal.dot(n) < 0.2 {
+            return None;
+        }
+        if let Some(d) = dashes
+            && along.rem_euclid((d.dash + d.gap).max(1e-6)) > d.dash
+        {
+            return None;
+        }
+        match outline {
+            Some((oc, w)) if dist > r - w => Some(oc),
+            _ => Some(color),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +409,28 @@ mod tests {
             }
         }
         m
+    }
+
+    #[test]
+    fn lines_are_measured_in_world_units_with_dashes() {
+        let m = atlas_cube();
+        let all: BTreeSet<_> = m.faces.keys().copied().collect();
+        let map = SurfaceMap::new(&m, &all, 96, 64, 0);
+        // Across the +Z face (z = 0.5), 0.2 wide.
+        let pts = [Vec3::new(-0.5, 0.0, 0.5), Vec3::new(0.5, 0.0, 0.5)];
+        let nrm = [Vec3::Z, Vec3::Z];
+        let mut t = Texture::new("t", 96, 64, [0, 0, 0, 255]);
+        let solid = surface_line(&mut t, &map, &pts, &nrm, 0.2, [255, 0, 0, 255], None, None, &Paint::default());
+        // The face is 32x32 texels per unit: about 32 x 6.4 texels.
+        assert!((150..260).contains(&solid), "{solid}");
+        // Nothing on the back (-Z) face even though it is within reach in y.
+        let back_texels = (0..t.height).flat_map(|y| (0..t.width).map(move |x| (x, y))).filter(|(x, y)| {
+            map.get(*x as i32, *y as i32).is_some_and(|s| s.normal.z < -0.5) && t.get(*x, *y)[0] == 255
+        });
+        assert_eq!(back_texels.count(), 0);
+        let mut t = Texture::new("t", 96, 64, [0, 0, 0, 255]);
+        let dashed = surface_line(&mut t, &map, &pts, &nrm, 0.2, [255, 0, 0, 255], None, Some(Dashes { dash: 0.1, gap: 0.1 }), &Paint::default());
+        assert!(dashed > solid / 3 && dashed < solid * 2 / 3, "{dashed} of {solid}");
     }
 
     #[test]

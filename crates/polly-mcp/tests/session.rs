@@ -1153,3 +1153,82 @@ fn opposite_view_references() {
     let front = render("front").unwrap();
     assert!(!front.pixels().any(|p| p[0] > 200 && p[1] < 50 && p[2] < 50), "front shows no reference");
 }
+
+/// paint_line: world-unit lines on the surface, from points or render pixels.
+#[test]
+fn surface_lines() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "uv_sphere", "radius": 0.5, "segments": 16, "rings": 10}, "name": "Ball"}));
+    call(&s, "auto_seams", json!({}));
+    call(&s, "unwrap", json!({"texture_size": [128, 128]}));
+    call(&s, "create_texture", json!({"name": "T", "width": 128, "height": 128, "fill": "#000000", "material": "M", "object": "Ball"}));
+    let solid = call(&s, "paint_line", json!({"object": "Ball", "points": [[0.5, 0, 0], [0, 0, 0.5], [-0.5, 0, 0], [0, 0, -0.5]], "closed": true, "width": 0.05, "color": "#ffffff"}));
+    let n = solid["pixels_changed"].as_u64().unwrap();
+    assert!(n > 100, "{solid}");
+    assert!((solid["length"].as_f64().unwrap() - 4.0 * 0.5 * 2f64.sqrt()).abs() < 0.01, "waypoint polyline length: {solid}");
+    call(&s, "undo", json!({}));
+    let dashed = call(&s, "paint_line", json!({"object": "Ball", "points": [[0.5, 0, 0], [0, 0, 0.5], [-0.5, 0, 0], [0, 0, -0.5]], "closed": true, "width": 0.05, "color": "#ffffff", "dashes": [0.05, 0.05]}));
+    let d = dashed["pixels_changed"].as_u64().unwrap();
+    assert!(d > n / 4 && d < n * 3 / 4, "dashes paint about half: {d} of {n}");
+    call_err(&s, "paint_line", json!({"object": "Ball", "points": [[0, 0, 0.5]], "width": 0.05, "color": "#ffffff"}));
+    // From render pixels across the middle of a front view.
+    let r = s.call("render", json!({"view": "front"}));
+    if r.is_error == Some(true) {
+        return;
+    }
+    let px = call(&s, "paint_line", json!({"pixels": [[180, 256], [330, 256]], "width": 0.04, "color": "#ff0000"}));
+    assert!(px["pixels_changed"].as_u64().unwrap() > 20, "{px}");
+}
+
+/// Two-bone IK: reaching a world target, and foot locking baked into a clip.
+#[test]
+fn two_bone_ik_tools() {
+    use polly_core::glam::Vec3;
+    let s = server();
+    call(&s, "add_mesh", json!({"name": "Rig", "vertices": [], "faces": [], "position": [2, 0, 0]}));
+    call(&s, "add_bone", json!({"object": "Rig", "name": "hips", "head": [0, 1, 0], "tail": [0, 1.2, 0]}));
+    call(&s, "add_bone", json!({"object": "Rig", "name": "thigh.L", "head": [0.1, 1, 0], "tail": [0.1, 0.55, 0.02], "parent": "hips"}));
+    call(&s, "add_bone", json!({"object": "Rig", "name": "shin.L", "head": [0.1, 0.55, 0.02], "tail": [0.1, 0.1, 0], "parent": "thigh.L"}));
+    // World position of the foot (shin tail) at a clip time (None = static pose).
+    let foot = |s: &polly_mcp::PollyServer, t: Option<f32>| {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let sc = &g.doc.scene;
+        let plays: Vec<_> = t.map(|t| polly_core::anim::ClipPlay { clip: *sc.clips.keys().next().unwrap(), time: t, weight: 1.0 }).into_iter().collect();
+        let shown = polly_core::anim::pose_scene(sc, &plays);
+        let (id, o) = shown.objects.iter().find(|(_, o)| o.name == "Rig").unwrap();
+        let sk = o.skeleton.as_ref().unwrap();
+        shown.world_matrix(*id).transform_point3(sk.bones[&sk.find("shin.L").unwrap()].tail)
+    };
+    let target = Vec3::new(2.25, 0.4, 0.2);
+    let r = call(&s, "solve_ik", json!({"object": "Rig", "bone": "shin.L", "target": target.to_array(), "pole": [2.1, 0.6, 1.0]}));
+    assert_eq!(r["reached"], true, "{r}");
+    assert!(foot(&s, None).distance(target) < 1e-3, "{}", foot(&s, None));
+    call_err(&s, "solve_ik", json!({"object": "Rig", "bone": "hips", "target": [0, 0, 0]}));
+
+    // The hips move forward through a step; the planted foot must not slide.
+    call(&s, "clear_pose", json!({"object": "Rig"}));
+    call(&s, "create_clip", json!({"name": "step", "frames": 12}));
+    call(&s, "set_key", json!({"clip": "step", "frame": 0, "object": "Rig", "bone": "hips", "property": "translation", "value": [0, 0, -0.15]}));
+    call(&s, "set_key", json!({"clip": "step", "frame": 12, "object": "Rig", "bone": "hips", "property": "translation", "value": [0, 0, 0.15]}));
+    let before: Vec<Vec3> = [0.0, 0.25, 0.5].iter().map(|t| foot(&s, Some(*t))).collect();
+    assert!(before[0].distance(before[2]) > 0.25, "without IK the foot slides with the hips");
+    // A straight leg can't reach once the hips move away: warned.
+    let r = call(&s, "bake_ik", json!({"clip": "step", "object": "Rig", "bone": "shin.L", "frames": [0, 12], "lock": true}));
+    assert_eq!(r["keys_written"], 26, "{r}");
+    assert!(r["warning"].as_str().unwrap().contains("out of reach"), "{r}");
+    // Lower the hips so the knee bends, plant the foot, then lock it there.
+    call(&s, "set_key", json!({"clip": "step", "frame": 0, "object": "Rig", "bone": "hips", "property": "translation", "value": [0, -0.2, -0.15]}));
+    call(&s, "set_key", json!({"clip": "step", "frame": 12, "object": "Rig", "bone": "hips", "property": "translation", "value": [0, -0.2, 0.15]}));
+    let r = call(&s, "bake_ik", json!({"clip": "step", "object": "Rig", "bone": "shin.L", "frames": [0, 12], "target": [2.1, 0.0, 0.0], "pole": [2.1, 0.5, 1.0]}));
+    assert!(r.get("warning").is_none(), "{r}");
+    let planted = foot(&s, Some(0.0));
+    assert!(planted.distance(Vec3::new(2.1, 0.0, 0.0)) < 1e-3, "{planted}");
+    let r = call(&s, "bake_ik", json!({"clip": "step", "object": "Rig", "bone": "shin.L", "frames": [0, 12], "lock": true}));
+    assert!(r.get("warning").is_none(), "{r}");
+    let before = vec![planted];
+    for f in [0.0f32, 3.0, 6.0, 9.0, 12.0] {
+        let p = foot(&s, Some(f / 24.0));
+        assert!(p.distance(before[0]) < 2e-3, "frame {f}: foot at {p}, locked at {}", before[0]);
+    }
+}

@@ -730,8 +730,8 @@ fn blend(base: Vec4, contribs: &[(Vec4, f32)], rotation: bool) -> Vec4 {
 /// weights, static poses and morph weights applied, meshes deformed (by their
 /// own skeleton or the armature they are bound to) and bones moved to their
 /// posed positions.
-pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
-    // Gather channel contributions per target.
+/// Channel values of the played clips, per target, with their weights.
+fn contributions(scene: &Scene, plays: &[ClipPlay]) -> BTreeMap<Target, Vec<(Vec4, f32)>> {
     let mut contribs: BTreeMap<Target, Vec<(Vec4, f32)>> = BTreeMap::new();
     for p in plays {
         let Some(clip) = scene.clips.get(&p.clip) else { continue };
@@ -745,6 +745,99 @@ pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
             }
         }
     }
+    contribs
+}
+
+/// An object's transform and bone pose with the clips applied (its static
+/// pose where nothing is animated).
+pub fn evaluate_object(scene: &Scene, plays: &[ClipPlay], id: ObjectId) -> Option<(crate::scene::Transform, BTreeMap<BoneId, BonePose>)> {
+    let o = scene.objects.get(&id)?;
+    let contribs = contributions(scene, plays);
+    let get = |t: Target, base: Vec4| contribs.get(&t).map_or(base, |c| blend(base, c, t.is_rotation()));
+    let mut tr = o.transform;
+    tr.translation = get(Target::ObjectTranslation { object: id }, tr.translation.extend(0.0)).truncate();
+    tr.rotation = Quat::from_vec4(get(Target::ObjectRotation { object: id }, Vec4::from(tr.rotation))).normalize();
+    tr.scale = get(Target::ObjectScale { object: id }, tr.scale.extend(0.0)).truncate();
+    let mut pose = o.pose.clone();
+    if let Some(sk) = &o.skeleton {
+        for &b in sk.bones.keys() {
+            let cur = pose.get(&b).copied().unwrap_or_default();
+            let p = BonePose {
+                translation: get(Target::BoneTranslation { object: id, bone: b }, cur.translation.extend(0.0)).truncate(),
+                rotation: Quat::from_vec4(get(Target::BoneRotation { object: id, bone: b }, Vec4::from(cur.rotation))).normalize(),
+                scale: get(Target::BoneScale { object: id, bone: b }, cur.scale.extend(0.0)).truncate(),
+            };
+            if p.is_rest() {
+                pose.remove(&b);
+            } else {
+                pose.insert(b, p);
+            }
+        }
+    }
+    Some((tr, pose))
+}
+
+/// Result of [`two_bone_ik`].
+#[derive(Debug, Clone, Copy)]
+pub struct IkResult {
+    /// Distance left between the end bone's tail and the target (0 when reached).
+    pub miss: f32,
+}
+
+/// Pose `lower` and its parent so that `lower`'s tail reaches `target`
+/// (object space). The chain bends in the plane through its root, the target
+/// and `pole` (default: the current bend; e.g. a point in front of the knee).
+/// Out of reach, the chain points straight at the target.
+pub fn two_bone_ik(sk: &Skeleton, pose: &mut BTreeMap<BoneId, BonePose>, lower: BoneId, target: Vec3, pole: Option<Vec3>) -> Result<IkResult> {
+    let Some(upper) = sk.bones.get(&lower).and_then(|b| b.parent) else {
+        return invalid(format!("'{}' has no parent bone: two-bone IK needs the chain upper -> lower", sk.bones.get(&lower).map_or("?", |b| b.name.as_str())));
+    };
+    let posed = |pose: &BTreeMap<BoneId, BonePose>| {
+        let w = sk.world_matrices(pose);
+        let head = |b: BoneId| w[&b].0.transform_point3(Vec3::ZERO);
+        let tail = |b: BoneId| (w[&b].0 * w[&b].1.inverse()).transform_point3(sk.bones[&b].tail);
+        (head(upper), head(lower), tail(lower))
+    };
+    let (a, b, c) = posed(pose);
+    let (l1, l2) = (a.distance(b), b.distance(c));
+    if l1 < 1e-6 || l2 < 1e-6 {
+        return invalid("the chain bones have no length");
+    }
+    let to = target - a;
+    let d = to.length().clamp((l1 - l2).abs() + 1e-4, l1 + l2 - 1e-5);
+    let dir = to.normalize_or(b - a);
+    // Bend direction: towards the pole (or the current knee), perpendicular to the root-target line.
+    let bend_from = |p: Vec3| {
+        let v = p - a;
+        (v - dir * v.dot(dir)).normalize_or_zero()
+    };
+    let mut side = pole.map_or(Vec3::ZERO, bend_from);
+    if side == Vec3::ZERO {
+        side = bend_from(b);
+    }
+    if side == Vec3::ZERO {
+        // Straight chain, no pole: bend along the lower bone's local -Z... any perpendicular will do.
+        side = dir.any_orthonormal_vector();
+    }
+    let along = (l1 * l1 - l2 * l2 + d * d) / (2.0 * d);
+    let knee = a + dir * along + side * (l1 * l1 - along * along).max(0.0).sqrt();
+    // Rotate each bone (in object space, about its head) from where it points to where it should.
+    let turn = |pose: &mut BTreeMap<BoneId, BonePose>, bone: BoneId, from: Vec3, to: Vec3| {
+        let delta = Quat::from_rotation_arc(from.normalize_or_zero(), to.normalize_or_zero());
+        let frame = sk.pose_frames(pose)[&bone];
+        let (_, f, _) = frame.to_scale_rotation_translation();
+        let p = pose.entry(bone).or_default();
+        p.rotation = (f.inverse() * delta * f * p.rotation).normalize();
+    };
+    turn(pose, upper, b - a, knee - a);
+    let (_, b2, c2) = posed(pose);
+    turn(pose, lower, c2 - b2, target - b2);
+    let (_, _, c3) = posed(pose);
+    Ok(IkResult { miss: c3.distance(target) })
+}
+
+pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
+    let contribs = contributions(scene, plays);
     let get = |t: Target, base: Vec4| contribs.get(&t).map_or(base, |c| blend(base, c, t.is_rotation()));
     let mut out = scene.clone();
     // Pass 1: object transforms, morph weights and skeleton poses.
@@ -925,6 +1018,40 @@ mod tests {
         let ch = c.channels[0].clone();
         let q = Quat::from_vec4(c.sample(&ch, 0.25).unwrap());
         assert!(q.angle_between(Quat::from_rotation_x(0.25)) < 0.05, "{q:?}");
+    }
+
+    #[test]
+    fn two_bone_ik_reaches_and_bends_towards_the_pole() {
+        let mut sk = Skeleton::default();
+        let thigh = sk.add(Bone { name: "thigh".into(), parent: None, head: Vec3::new(0.1, 1.0, 0.0), tail: Vec3::new(0.1, 0.5, 0.02), roll: 15.0 }).unwrap();
+        let shin = sk.add(Bone { name: "shin".into(), parent: Some(thigh), head: Vec3::new(0.1, 0.5, 0.02), tail: Vec3::new(0.1, 0.05, 0.0), roll: -30.0 }).unwrap();
+        let tip = |pose: &BTreeMap<BoneId, BonePose>, b: BoneId| {
+            let w = sk.world_matrices(pose);
+            (w[&b].0 * w[&b].1.inverse()).transform_point3(sk.bones[&b].tail)
+        };
+        for (target, pole) in [(Vec3::new(0.3, 0.3, 0.2), Vec3::new(0.1, 0.6, 1.0)), (Vec3::new(0.0, 0.4, -0.3), Vec3::new(0.1, 0.6, -1.0))] {
+            let mut pose = BTreeMap::new();
+            let r = two_bone_ik(&sk, &mut pose, shin, target, Some(pole)).unwrap();
+            assert!(r.miss < 1e-3, "miss {}", r.miss);
+            assert!(tip(&pose, shin).distance(target) < 1e-3);
+            // The knee sits on the pole's side of the hip-target line.
+            let knee = tip(&pose, thigh);
+            let hip = Vec3::new(0.1, 1.0, 0.0);
+            let line = (target - hip).normalize();
+            let off = |p: Vec3| (p - hip) - line * (p - hip).dot(line);
+            assert!(off(knee).dot(off(pole)) > 0.0, "knee {knee} bends away from pole {pole}");
+            // Bone lengths are unchanged.
+            assert!((knee.distance(hip) - 0.5004).abs() < 1e-3);
+        }
+        // Out of reach: straight towards the target.
+        let mut pose = BTreeMap::new();
+        let target = Vec3::new(0.1, -2.0, 0.5);
+        let r = two_bone_ik(&sk, &mut pose, shin, target, None).unwrap();
+        assert!(r.miss > 1.0);
+        let (hip, knee, foot) = (Vec3::new(0.1, 1.0, 0.0), tip(&pose, thigh), tip(&pose, shin));
+        assert!((knee - hip).normalize().dot((target - hip).normalize()) > 0.999);
+        assert!((foot - hip).normalize().dot((target - hip).normalize()) > 0.999);
+        assert!(two_bone_ik(&sk, &mut pose, thigh, target, None).is_err(), "the root bone has no parent");
     }
 
     #[test]

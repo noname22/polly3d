@@ -24,7 +24,7 @@ pub use faces::{Fill, bake_vertex_colors, face_mask, face_uv_polys, fill_faces, 
 pub use io::{TextureStats, from_png, stats, to_png};
 pub use mask::{FaceUv, Mask, Region};
 pub use quantize::{quantize, resize_nearest};
-pub use surface::{Ao, HeightShade, Noise3d, Shading, SurfaceMap, bake_shading, noise3d, stamp};
+pub use surface::{Ao, Dashes, HeightShade, Noise3d, Shading, SurfaceMap, bake_shading, noise3d, stamp, surface_line};
 
 #[cfg(test)]
 mod tests {

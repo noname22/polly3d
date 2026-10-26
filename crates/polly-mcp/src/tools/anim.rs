@@ -56,6 +56,18 @@ pub fn tools() -> Vec<ToolDef> {
         def("weight_report", "Skin weight summary: vertices per bone, unweighted vertices, vertices with more than 4 influences or unnormalized sums.", true, weight_report),
         // pose
         def(
+            "solve_ik",
+            "Two-bone IK on the static pose: rotate `bone` (e.g. a shin or forearm) and its parent (thigh, upper arm) so that `bone`'s tail reaches `target` (world space). The joint bends towards `pole` (a world point in front of the knee / behind the elbow; default: the current bend). Key the result with key_pose.",
+            false,
+            solve_ik,
+        ),
+        def(
+            "bake_ik",
+            "Two-bone IK baked into a clip: for every frame in `frames`, pose `bone` and its parent so its tail reaches `target` (world space) and key their rotations. With `lock: true` the target is where the tail is at the first frame of the range: foot locking during a stance phase, so the foot doesn't slide while the hips move. The rest of the animation (hips, other bones, the object's motion) is taken from the clip.",
+            false,
+            bake_ik,
+        ),
+        def(
             "mirror_pose",
             "Mirror the static pose across the rig's X = 0 plane, swapping left/right bones by name (hand.L <-> hand.R; centre bones mirror onto themselves). mode: flip (default; the whole pose becomes its mirror image), left_to_right or right_to_left (copy one side's pose onto the other). Signs are handled for you.",
             false,
@@ -598,6 +610,111 @@ fn pose_bone(ctx: &mut Ctx, a: PoseBone) -> Result<Out> {
     })?;
     let out = Out::json(json!({"posed": a.bone, "hint": "render (bones overlay) to check; key_pose to record into a clip"}));
     super::view::maybe_preview(ctx, obj, out)
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SolveIk {
+    object: Option<String>,
+    /// The end bone of the chain (its parent is the chain's root).
+    bone: String,
+    /// World point for the bone's tail.
+    target: [f32; 3],
+    /// World point the middle joint bends towards.
+    pole: Option<[f32; 3]>,
+}
+
+fn solve_ik(ctx: &mut Ctx, a: SolveIk) -> Result<Out> {
+    let s = &ctx.doc.scene;
+    let obj = rig(s, resolve(s, &a.object)?);
+    let lower = bone_of(s, obj, &a.bone)?;
+    let o = s.object(obj)?;
+    let sk = o.skeleton.clone().context("no skeleton")?;
+    let inv = s.world_matrix(obj).inverse();
+    let mut pose = o.pose.clone();
+    let r = anim::two_bone_ik(&sk, &mut pose, lower, inv.transform_point3(v3(a.target)), a.pole.map(|p| inv.transform_point3(v3(p))))?;
+    pose.retain(|_, p| !p.is_rest());
+    edit_scene(ctx, "solve ik", |s| {
+        s.object_mut(obj)?.pose = pose;
+        Ok(())
+    })?;
+    let mut j = json!({"reached": r.miss < 1e-3, "hint": "key_pose to record it; render to check"});
+    if r.miss >= 1e-3 {
+        j["miss"] = json!((r.miss * 1000.0).round() / 1000.0);
+        j["note"] = json!("target out of reach: the chain points straight at it");
+    }
+    super::view::maybe_preview(ctx, obj, Out::json(j))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct BakeIk {
+    clip: String,
+    object: Option<String>,
+    /// The end bone of the chain (e.g. "shin.L").
+    bone: String,
+    /// Frame range [start, end], inclusive; every frame is keyed.
+    frames: [f32; 2],
+    /// World point for the bone's tail...
+    target: Option<[f32; 3]>,
+    /// ...or keep the tail where it is at the first frame (foot locking).
+    #[serde(default)]
+    lock: bool,
+    /// World point the middle joint bends towards (default: the clip's own bend each frame).
+    pole: Option<[f32; 3]>,
+}
+
+fn bake_ik(ctx: &mut Ctx, a: BakeIk) -> Result<Out> {
+    let s = &ctx.doc.scene;
+    let clip = s.resolve_clip(&a.clip)?;
+    let obj = rig(s, resolve(s, &a.object)?);
+    let lower = bone_of(s, obj, &a.bone)?;
+    let o = s.object(obj)?;
+    let sk = o.skeleton.clone().context("no skeleton")?;
+    let upper = sk.bones[&lower].parent.with_context(|| format!("'{}' has no parent bone", a.bone))?;
+    let c = &s.clips[&clip];
+    let (f0, f1) = (a.frames[0].round() as i64, a.frames[1].round() as i64);
+    if f1 < f0 || f0 < 0 {
+        bail!("frames must be [start, end] with 0 <= start <= end");
+    }
+    // The rig's world matrix and pose at a frame, from the clip as it is now.
+    let at = |f: i64| -> Result<(polly_core::glam::Mat4, BTreeMap<BoneId, anim::BonePose>)> {
+        let t = (f as f32 / c.fps).min(c.length);
+        let (tr, pose) = anim::evaluate_object(s, &[anim::ClipPlay { clip, time: t, weight: 1.0 }], obj).context("rig not found")?;
+        Ok((s.world_matrix(obj) * o.transform.matrix().inverse() * tr.matrix(), pose))
+    };
+    let target = match (a.target, a.lock) {
+        (Some(t), false) => v3(t),
+        (None, true) => {
+            let (w, pose) = at(f0)?;
+            let m = sk.world_matrices(&pose);
+            w.transform_point3((m[&lower].0 * m[&lower].1.inverse()).transform_point3(sk.bones[&lower].tail))
+        }
+        _ => bail!("give either `target` or `lock: true`"),
+    };
+    let mut keys = Vec::new();
+    let mut worst: f32 = 0.0;
+    for f in f0..=f1 {
+        let (w, mut pose) = at(f)?;
+        let inv = w.inverse();
+        let r = anim::two_bone_ik(&sk, &mut pose, lower, inv.transform_point3(target), a.pole.map(|p| inv.transform_point3(v3(p))))?;
+        worst = worst.max(r.miss);
+        let t = (f as f32 / c.fps).min(c.length);
+        for b in [upper, lower] {
+            keys.push((b, t, pose.get(&b).copied().unwrap_or_default().rotation));
+        }
+    }
+    let n = keys.len();
+    edit_scene(ctx, "bake ik", |s| {
+        let c = s.clips.get_mut(&clip).unwrap();
+        for (b, t, q) in keys {
+            c.channel_mut(Target::BoneRotation { object: obj, bone: b }).set_key(t, Vec4::from(q));
+        }
+        Ok(())
+    })?;
+    let mut j = json!({"keys_written": n, "target": round3(target), "frames": [f0, f1]});
+    if worst >= 1e-3 {
+        j["warning"] = json!(format!("the target was out of reach on some frames (up to {:.3} short)", worst));
+    }
+    Ok(Out::json(j))
 }
 
 /// Which side a bone name marks: Some(true) = left, Some(false) = right, None = centre.
