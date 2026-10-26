@@ -102,6 +102,12 @@ struct RenderArgs {
     show_weights: Option<String>,
     /// Show these variants instead of the active ones, e.g. {"hair": "braids", "head": "helmet"}.
     variants: Option<BTreeMap<String, String>>,
+    /// Frame this world box [[min x,y,z],[max x,y,z]] instead of the whole model (a close-up in any view).
+    region: Option<[[f32; 3]; 2]>,
+    /// Reference images at this opacity (0..1), this render only.
+    reference_opacity: Option<f32>,
+    /// Reference images "behind" or "front" (on top), this render only.
+    reference_layer: Option<polly_core::reference::Layer>,
 }
 
 /// The scene as it should be shown for these args: variants chosen, posed and,
@@ -140,6 +146,9 @@ fn options(scene: &Scene, a: &RenderArgs, default_size: u32) -> Result<RenderOpt
         label_scale: a.label_scale,
         legend: a.legend.unwrap_or(true),
         frame_bounds: None,
+        region: a.region,
+        reference_opacity: a.reference_opacity,
+        reference_layer: a.reference_layer,
     })
 }
 

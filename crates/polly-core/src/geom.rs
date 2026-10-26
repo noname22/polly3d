@@ -118,3 +118,39 @@ mod tests {
         assert!((area - 3.0).abs() < 1e-5);
     }
 }
+
+/// Extent along `u` of where triangles cross the plane `p·v = at`: the
+/// outline of a mesh at that height, as seen along `u × v` (orthographic).
+pub fn slice_extent(tris: &[[Vec3; 3]], u: Vec3, v: Vec3, at: f32) -> Option<(f32, f32)> {
+    let mut range: Option<(f32, f32)> = None;
+    let mut add = |p: Vec3| {
+        let x = p.dot(u);
+        range = Some(range.map_or((x, x), |(a, b)| (a.min(x), b.max(x))));
+    };
+    for t in tris {
+        let h = t.map(|p| p.dot(v) - at);
+        for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+            let (a, b) = (h[i], h[j]);
+            if a == 0.0 {
+                add(t[i]);
+            }
+            if (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0) {
+                add(t[i].lerp(t[j], a / (a - b)));
+            }
+        }
+    }
+    range
+}
+
+#[cfg(test)]
+mod slice_tests {
+    use super::*;
+
+    #[test]
+    fn slice_extent_of_a_tilted_triangle() {
+        let t = [[Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 0.0)]];
+        let (a, b) = slice_extent(&t, Vec3::X, Vec3::Y, 1.0).unwrap();
+        assert!((a - 0.5).abs() < 1e-6 && (b - 1.5).abs() < 1e-6);
+        assert!(slice_extent(&t, Vec3::X, Vec3::Y, 3.0).is_none());
+    }
+}

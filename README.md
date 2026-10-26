@@ -129,7 +129,10 @@ format and [docs/bevy.md](docs/bevy.md) for using it in Bevy.
 A reference image (a character sheet, a blueprint) is shown behind or over the
 model in one of the six axis views (front, back, left, right, top, bottom). It is placed in world units, so it zooms
 with the model and stays put while the camera re-frames. `crop` picks one view
-out of a multi-view sheet, and `height` scales it to the subject's real size.
+out of a multi-view sheet, and `height` scales it to the subject's real size,
+or `calibrate` places it by two known points (the ground row, the top of the
+head). `measure_reference` reads the drawing's edges in metres at any height,
+and `compare_reference` diffs the model's outline against the drawing.
 The agent manages references with `add_reference`, `update_reference`,
 `remove_reference` and `list_references`; they appear in its `render` of that
 view and are saved in the project file.

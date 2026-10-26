@@ -440,6 +440,7 @@ struct RefState {
 #[derive(Default, Clone, Copy, PartialEq)]
 struct RefOverride {
     visible: Option<bool>,
+    flip: Option<bool>,
     layer: Option<Layer>,
     opacity: Option<f32>,
 }
@@ -452,6 +453,7 @@ impl RefState {
         for r in &mut scene.references {
             if let Some(o) = self.overrides.get(&r.name) {
                 r.visible = o.visible.unwrap_or(r.visible);
+                r.flip = o.flip.unwrap_or(r.flip);
                 r.layer = o.layer.unwrap_or(r.layer);
                 r.opacity = o.opacity.unwrap_or(r.opacity);
             }
@@ -478,7 +480,8 @@ fn ref_cam(v: RefView) -> Cam {
 
 /// Visible checkbox and view button, layer toggle and opacity slider for one
 /// reference, editing `visible`, `layer` and `opacity` in place.
-fn ref_controls(ui: &mut egui::Ui, cam: &mut Cam, label: &str, view: RefView, visible: &mut bool, layer: &mut Layer, opacity: &mut f32) {
+#[allow(clippy::too_many_arguments)]
+fn ref_controls(ui: &mut egui::Ui, cam: &mut Cam, label: &str, view: RefView, visible: &mut bool, layer: &mut Layer, opacity: &mut f32, flip: &mut bool) {
     ui.horizontal(|ui| {
         ui.checkbox(visible, label);
         let c = ref_cam(view);
@@ -492,6 +495,7 @@ fn ref_controls(ui: &mut egui::Ui, cam: &mut Cam, label: &str, view: RefView, vi
                 *layer = l;
             }
         }
+        ui.checkbox(flip, "Flip").on_hover_text("mirror the image left/right");
     });
     ui.add(egui::Slider::new(opacity, 0.0..=1.0).text("opacity"));
 }
@@ -507,7 +511,9 @@ fn references_panel(ui: &mut egui::Ui, view: &mut ViewState, name: &str, agent: 
     for r in agent {
         let o = st.overrides.entry(r.name.clone()).or_default();
         let (mut visible, mut layer, mut opacity) = (o.visible.unwrap_or(r.visible), o.layer.unwrap_or(r.layer), o.opacity.unwrap_or(r.opacity));
-        ref_controls(ui, cam, &r.name, r.view, &mut visible, &mut layer, &mut opacity);
+        let mut flip = o.flip.unwrap_or(r.flip);
+        ref_controls(ui, cam, &r.name, r.view, &mut visible, &mut layer, &mut opacity, &mut flip);
+        o.flip = (flip != r.flip).then_some(flip);
         // Keep only what differs from the agent's settings.
         o.visible = (visible != r.visible).then_some(visible);
         o.layer = (layer != r.layer).then_some(layer);
@@ -522,7 +528,7 @@ fn references_panel(ui: &mut egui::Ui, view: &mut ViewState, name: &str, agent: 
         ui.weak("Not visible to the agent.");
         let mut remove = None;
         for (i, r) in st.mine.iter_mut().enumerate() {
-            ref_controls(ui, cam, &r.name, r.view, &mut r.visible, &mut r.layer, &mut r.opacity);
+            ref_controls(ui, cam, &r.name, r.view, &mut r.visible, &mut r.layer, &mut r.opacity, &mut r.flip);
             if ui.small_button("Remove").clicked() {
                 remove = Some(i);
             }

@@ -1232,3 +1232,54 @@ fn two_bone_ik_tools() {
         assert!(p.distance(before[0]) < 2e-3, "frame {f}: foot at {p}, locked at {}", before[0]);
     }
 }
+
+/// Reference measuring: two-point calibration, flip, measure and compare.
+#[test]
+fn reference_measure_and_compare() {
+    let s = server();
+    let dir = std::env::temp_dir().join(format!("polly-refm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // White sheet; a black figure 40 px wide (columns 80..120) from row 40 to 360, and a
+    // mark to its right (columns 150..170, rows 100..120).
+    let img = image::RgbaImage::from_fn(200, 400, |x, y| {
+        let body = (80..120).contains(&x) && (40..360).contains(&y);
+        let mark = (150..170).contains(&x) && (100..120).contains(&y);
+        if body || mark { image::Rgba([20, 20, 30, 255]) } else { image::Rgba([250, 248, 240, 255]) }
+    });
+    let path = dir.join("sheet.png");
+    img.save(&path).unwrap();
+    // Row 360 is the ground and row 40 is 1.6 m up, both on column 100 (x = 0).
+    let r = call(&s, "add_reference", json!({"path": path.to_str().unwrap(), "view": "front", "name": "sheet",
+        "calibrate": [{"pixel": [100, 360], "at": [0, 0]}, {"pixel": [100, 40], "at": [0, 1.6]}]}));
+    assert!((r["world_per_pixel"].as_f64().unwrap() - 0.005).abs() < 1e-6, "{r}");
+    std::fs::remove_dir_all(&dir).ok();
+
+    let m = call(&s, "measure_reference", json!({"name": "sheet", "heights": [0.5, 1.25]}));
+    assert_eq!(m["drawing"]["y_range"], json!([0.0, 1.6]), "{m}");
+    assert_eq!(m["rows"][0]["x"], json!([-0.1, 0.1]), "{m}");
+    assert_eq!(m["rows"][1]["x"], json!([-0.1, 0.35]), "the mark on the right: {m}");
+    call(&s, "update_reference", json!({"name": "sheet", "flip": true}));
+    let m = call(&s, "measure_reference", json!({"name": "sheet", "heights": [1.25]}));
+    // Flipping mirrors about the image centre (column 100 is the centre, x = 0).
+    assert_eq!(m["rows"][0]["x"], json!([-0.35, 0.1]), "flipped: {m}");
+    call(&s, "update_reference", json!({"name": "sheet", "flip": false}));
+
+    // A 0.3 m wide model: 5 cm too wide on each side where only the figure is drawn.
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.3, 1.6, 0.3]}, "name": "Body", "position": [0, 0.8, 0]}));
+    let r = s.call("compare_reference", json!({"name": "sheet", "heights": [0.5, 1.25, 1.7]}));
+    assert_ne!(r.is_error, Some(true), "{}", text(&r));
+    assert_eq!(images(&r).len(), 1);
+    let c: Value = serde_json::from_str(&text(&r)).unwrap();
+    assert_eq!(c["rows"][0]["sticks_out"], json!({"-x": 0.05, "+x": 0.05}), "{c}");
+    assert_eq!(c["rows"][1]["sticks_out"]["+x"], json!(-0.2), "the model falls short of the mark: {c}");
+    assert!(c["rows"][2].get("sticks_out").is_none(), "above both");
+    // Region render with the reference on top, at full opacity, this render only.
+    let r = s.call("render", json!({"view": "front", "region": [[-0.2, 1.1, -0.2], [0.4, 1.4, 0.2]], "reference_opacity": 1.0, "reference_layer": "front", "width": 200, "height": 200, "overlays": {"grid": false}}));
+    if r.is_error != Some(true) {
+        let img = image::load_from_memory(&images(&r)[0]).unwrap().to_rgba8();
+        // The close-up is filled by the sheet drawn on top (white paper or dark ink, not the grey model).
+        let p = img.get_pixel(100, 100);
+        assert!(p[0] > 230 || p[0] < 40, "{p:?}");
+    }
+    assert_eq!(call(&s, "list_references", json!({}))["references"][0]["opacity"], 0.5, "the scene's own opacity is unchanged");
+}

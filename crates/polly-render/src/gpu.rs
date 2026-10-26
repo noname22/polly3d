@@ -73,7 +73,7 @@ pub(crate) fn setup(scene: &Scene, o: &RenderOptions, size: [u32; 2]) -> Setup {
         Some(f) => prep.objects.iter().filter(|p| f.contains(&p.id)).collect(),
         None => all_refs.clone(),
     };
-    let frame = match o.frame_bounds {
+    let frame = match o.frame_bounds.or(o.region) {
         Some([lo, hi]) => (Vec3::from(lo), Vec3::from(hi)),
         None => {
             let objects = world_bounds(&focus_refs).or_else(|| world_bounds(&all_refs));
@@ -793,12 +793,13 @@ impl Renderer {
             cam.ortho && f.dot(-u.cross(up)) > 0.999
         });
         if o.overlays.references {
-            for rf in scene.references.iter().filter(|r| r.visible && Some(r.view) == shown_view && r.opacity > 0.0) {
+            for rf in scene.references.iter().filter(|r| r.visible && Some(r.view) == shown_view && o.reference_opacity.unwrap_or(r.opacity) > 0.0) {
                 let Some(tview) = self.reference_view(rf, &mut notes) else { continue };
                 let q = rf.quad();
                 let verts: Vec<RefVertex> =
                     [0, 1, 2, 0, 2, 3].iter().map(|&i| RefVertex { pos: q[i].0.to_array(), uv: q[i].1 }).collect();
-                let mu = MaterialUniform { base: [1.0, 1.0, 1.0, rf.opacity.clamp(0.0, 1.0)], params: [0.0; 4] };
+                let opacity = o.reference_opacity.unwrap_or(rf.opacity).clamp(0.0, 1.0);
+                let mu = MaterialUniform { base: [1.0, 1.0, 1.0, opacity], params: [0.0; 4] };
                 let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("reference"),
                     contents: bytemuck::bytes_of(&mu),
@@ -818,7 +819,7 @@ impl Renderer {
                     contents: bytemuck::cast_slice(&verts),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
-                ref_draws.push(RefDraw { vb, bg, front: rf.layer == Layer::Front });
+                ref_draws.push(RefDraw { vb, bg, front: o.reference_layer.unwrap_or(rf.layer) == Layer::Front });
             }
         }
         self.references.retain(|name, _| scene.references.iter().any(|r| &r.name == name));

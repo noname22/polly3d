@@ -71,6 +71,9 @@ pub struct Reference {
     pub layer: Layer,
     pub opacity: f32,
     pub visible: bool,
+    /// Mirror the image left/right (e.g. a side sheet reused for the other side).
+    #[serde(default)]
+    pub flip: bool,
 }
 
 impl Reference {
@@ -98,14 +101,114 @@ impl Reference {
         let h = self.extent() * 0.5;
         let r = self.rect();
         let (w, ht) = (self.width.max(1) as f32, self.height.max(1) as f32);
-        let (u0, v0) = (r[0] as f32 / w, r[1] as f32 / ht);
-        let (u1, v1) = ((r[0] + r[2]) as f32 / w, (r[1] + r[3]) as f32 / ht);
+        let (mut u0, v0) = (r[0] as f32 / w, r[1] as f32 / ht);
+        let (mut u1, v1) = ((r[0] + r[2]) as f32 / w, (r[1] + r[3]) as f32 / ht);
+        if self.flip {
+            std::mem::swap(&mut u0, &mut u1);
+        }
         [
             (c - u * h.x + v * h.y, [u0, v0]),
             (c + u * h.x + v * h.y, [u1, v0]),
             (c + u * h.x - v * h.y, [u1, v1]),
             (c - u * h.x - v * h.y, [u0, v1]),
         ]
+    }
+
+    /// Source pixel (x, y; image coordinates, top-left origin) -> view
+    /// coordinates (u, v) in world units.
+    pub fn pixel_to_view(&self, px: f32, py: f32) -> Vec2 {
+        let r = self.rect();
+        let (cx, cy) = (r[0] as f32 + r[2] as f32 / 2.0, r[1] as f32 + r[3] as f32 / 2.0);
+        let sx = if self.flip { -1.0 } else { 1.0 };
+        let k = self.scale();
+        Vec2::new(self.center[0] + sx * (px - cx) * k, self.center[1] - (py - cy) * k)
+    }
+
+    /// View coordinates (u, v) -> source pixel (x, y).
+    pub fn view_to_pixel(&self, uv: Vec2) -> Vec2 {
+        let r = self.rect();
+        let (cx, cy) = (r[0] as f32 + r[2] as f32 / 2.0, r[1] as f32 + r[3] as f32 / 2.0);
+        let sx = if self.flip { -1.0 } else { 1.0 };
+        let k = self.scale().max(1e-12);
+        Vec2::new(cx + sx * (uv.x - self.center[0]) / k, cy - (uv.y - self.center[1]) / k)
+    }
+
+    /// Place the image so two source pixels land on two view points (u, v):
+    /// sets `size` (uniform scale from their distance) and `center`.
+    pub fn calibrate(&mut self, a: (Vec2, Vec2), b: (Vec2, Vec2)) -> Result<()> {
+        let (dp, dw) = (a.0.distance(b.0), a.1.distance(b.1));
+        if dp < 1e-3 || dw < 1e-6 {
+            return invalid("calibration points must be apart, both in the image and in the world");
+        }
+        let k = dw / dp;
+        self.size = self.rect()[3].max(1) as f32 * k;
+        // Solve the centre from point a.
+        self.center = [0.0, 0.0];
+        let at_origin = self.pixel_to_view(a.0.x, a.0.y);
+        self.center = (a.1 - at_origin).to_array();
+        Ok(())
+    }
+
+    fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * self.width + x) * 4) as usize;
+        self.pixels[i..i + 4].try_into().unwrap()
+    }
+
+    /// Background colour: the median of the crop's border pixels.
+    pub fn background(&self) -> [u8; 4] {
+        let [x0, y0, w, h] = self.rect();
+        let mut border = Vec::new();
+        for x in x0..x0 + w {
+            border.push(self.pixel(x, y0));
+            border.push(self.pixel(x, y0 + h - 1));
+        }
+        for y in y0..y0 + h {
+            border.push(self.pixel(x0, y));
+            border.push(self.pixel(x0 + w - 1, y));
+        }
+        let mut out = [0u8; 4];
+        for (c, o) in out.iter_mut().enumerate() {
+            let mut ch: Vec<u8> = border.iter().map(|p| p[c]).collect();
+            ch.sort_unstable();
+            *o = ch[ch.len() / 2];
+        }
+        out
+    }
+
+    /// Is this pixel part of the drawing: opaque and clearly unlike the background?
+    pub fn is_ink(&self, x: u32, y: u32, bg: [u8; 4], threshold: f32) -> bool {
+        let p = self.pixel(x, y);
+        if p[3] < 128 {
+            return false;
+        }
+        if bg[3] < 128 {
+            return true; // cut-out image: everything opaque is the subject
+        }
+        let d = (0..3).map(|c| (p[c] as f32 - bg[c] as f32).powi(2)).sum::<f32>().sqrt();
+        d > threshold
+    }
+
+    /// Outermost ink on a source row (within the crop): (first x, last x).
+    pub fn ink_span(&self, y: u32, bg: [u8; 4], threshold: f32) -> Option<(u32, u32)> {
+        let [x0, y0, w, h] = self.rect();
+        if y < y0 || y >= y0 + h {
+            return None;
+        }
+        let first = (x0..x0 + w).find(|x| self.is_ink(*x, y, bg, threshold))?;
+        let last = (x0..x0 + w).rev().find(|x| self.is_ink(*x, y, bg, threshold))?;
+        Some((first, last))
+    }
+
+    /// The drawing's outer edges at view height `v`, in view units (u_min, u_max).
+    pub fn edges_at(&self, v: f32, bg: [u8; 4], threshold: f32) -> Option<(f32, f32)> {
+        let py = self.view_to_pixel(Vec2::new(self.center[0], v)).y.floor();
+        if py < 0.0 {
+            return None;
+        }
+        let (a, b) = self.ink_span(py as u32, bg, threshold)?;
+        // Pixel edges: the outer sides of the outermost ink pixels.
+        let (ua, ub) = (self.pixel_to_view(a as f32, py).x, self.pixel_to_view(b as f32 + 1.0, py).x);
+        Some((ua.min(ub), ua.max(ub)))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -173,6 +276,7 @@ mod tests {
             layer: Layer::Behind,
             opacity: 0.5,
             visible: true,
+            flip: false,
         }
     }
 
@@ -195,6 +299,47 @@ mod tests {
         let mut r = reference(RefView::Front);
         r.crop = None;
         assert_eq!(r.extent(), Vec2::new(8.0, 4.0));
+    }
+
+    #[test]
+    fn pixel_mapping_calibration_and_ink() {
+        // 100x200 white image with a black bar in columns 40..60, rows 20..180.
+        let mut px = vec![255u8; 100 * 200 * 4];
+        for y in 20..180 {
+            for x in 40..60 {
+                let i = (y * 100 + x) * 4;
+                px[i..i + 3].copy_from_slice(&[0, 0, 0]);
+            }
+        }
+        let mut r = Reference {
+            name: "bar".into(),
+            view: RefView::Front,
+            width: 100,
+            height: 200,
+            pixels: Arc::new(px),
+            crop: None,
+            center: [0.0, 1.0],
+            size: 2.0,
+            layer: Layer::Behind,
+            opacity: 0.5,
+            visible: true,
+            flip: false,
+        };
+        // Row 180 (bottom of the bar) is the ground, row 20 is 1.6 m up; column 50 is x = 0.
+        r.calibrate((Vec2::new(50.0, 180.0), Vec2::new(0.0, 0.0)), (Vec2::new(50.0, 20.0), Vec2::new(0.0, 1.6))).unwrap();
+        assert!((r.scale() - 0.01).abs() < 1e-6);
+        assert!(r.pixel_to_view(50.0, 180.0).abs_diff_eq(Vec2::ZERO, 1e-5));
+        assert!(r.view_to_pixel(Vec2::new(0.0, 1.6)).abs_diff_eq(Vec2::new(50.0, 20.0), 1e-3));
+        // The bar is 20 px = 0.2 m wide, centred on x = 0.
+        let bg = r.background();
+        assert_eq!(bg, [255, 255, 255, 255]);
+        let (a, b) = r.edges_at(0.8, bg, 60.0).unwrap();
+        assert!((a + 0.1).abs() < 1e-4 && (b - 0.1).abs() < 1e-4, "{a} {b}");
+        assert!(r.edges_at(1.7, bg, 60.0).is_none(), "above the bar");
+        // Flipped, the mapping mirrors about the centre.
+        r.flip = true;
+        r.calibrate((Vec2::new(40.0, 180.0), Vec2::new(0.0, 0.0)), (Vec2::new(40.0, 20.0), Vec2::new(0.0, 1.6))).unwrap();
+        assert!(r.pixel_to_view(60.0, 100.0).x < 0.0, "flipped: right in the image is left in the view");
     }
 
     #[test]

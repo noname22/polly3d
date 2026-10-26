@@ -178,6 +178,13 @@ pub struct RenderOptions {
     /// Draw the corner legend (view name, axis hints, axis gizmo). Default true.
     #[serde(default = "t")]
     pub legend: bool,
+    /// Frame this world box [[min x, y, z], [max x, y, z]] instead of the whole
+    /// model: a close-up of a region (shoulders, a hand) in any view.
+    pub region: Option<[[f32; 3]; 2]>,
+    /// Draw reference images at this opacity (0..1) in this render only.
+    pub reference_opacity: Option<f32>,
+    /// Draw reference images behind or on top in this render only.
+    pub reference_layer: Option<polly_core::reference::Layer>,
     /// Frame these world bounds instead of the scene's (e.g. the rest pose, so
     /// the camera holds still while an animation plays). Not an agent option.
     #[serde(skip)]
@@ -200,6 +207,9 @@ impl Default for RenderOptions {
             label_scale: None,
             legend: true,
             frame_bounds: None,
+            region: None,
+            reference_opacity: None,
+            reference_layer: None,
         }
     }
 }

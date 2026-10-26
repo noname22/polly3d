@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use polly_core::reference::{Layer, RefView, Reference};
 use polly_core::scene::Scene;
 use schemars::JsonSchema;
@@ -30,6 +30,18 @@ pub fn tools() -> Vec<ToolDef> {
             update_reference,
         ),
         def("remove_reference", "Remove a reference image.", false, remove_reference),
+        def(
+            "measure_reference",
+            "Measure the drawing in a reference image in world units: its top and bottom, and its outer edges at given heights (default: 12 evenly spaced). The drawing is what differs from the image's background (or its alpha); everything counts, so crop away captions and neighbouring views. Use it to block out to the drawing's proportions.",
+            true,
+            measure_reference,
+        ),
+        def(
+            "compare_reference",
+            "Compare the model's outline in a reference's view with the drawing: per height, how far the model sticks out (+) or falls short (-) on each side, in world units, plus a picture (red = model outside the drawing, blue = drawing not covered by the model). Outer outlines only (holes between arm and body don't count).",
+            true,
+            compare_reference,
+        ),
         def("list_references", "List reference images with their view, crop, placement in world units, layer and opacity.", true, list_references),
     ]
 }
@@ -60,6 +72,7 @@ pub fn load_reference(path: &str, view: RefView, name: Option<&str>) -> Result<R
         layer: Layer::Behind,
         opacity: 0.5,
         visible: true,
+        flip: false,
     })
 }
 
@@ -94,7 +107,26 @@ fn ref_json(r: &Reference) -> Value {
         "layer": r.layer,
         "opacity": r4(r.opacity),
         "visible": r.visible,
+        "flip": r.flip,
     })
+}
+
+/// World axis a view direction runs along: ("x", 1.0) for +X, ("z", -1.0) for -Z.
+fn axis(d: polly_core::glam::Vec3) -> (&'static str, f32) {
+    if d.x.abs() > 0.5 {
+        ("x", d.x.signum())
+    } else if d.y.abs() > 0.5 {
+        ("y", d.y.signum())
+    } else {
+        ("z", d.z.signum())
+    }
+}
+
+/// A view-u range as a sorted world-axis range.
+fn world_range(view: RefView, lo: f32, hi: f32) -> [f64; 2] {
+    let (_, s) = axis(view.axes().0);
+    let (a, b) = (lo * s, hi * s);
+    [r4(a.min(b)), r4(a.max(b))]
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -114,6 +146,25 @@ struct AddReference {
     layer: Option<Layer>,
     /// 0..1, default 0.5.
     opacity: Option<f32>,
+    /// Mirror the image left/right.
+    #[serde(default)]
+    flip: bool,
+    /// Place it by two known points instead of center/height: e.g. the ground row
+    /// and the top of the head (file pixels -> view coordinates).
+    calibrate: Option<[CalPoint; 2]>,
+}
+
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+struct CalPoint {
+    /// Image pixel [x, y] (top-left origin).
+    pixel: [f32; 2],
+    /// Where it belongs in the view's screen axes [u, v], world units (front: [x, y]; right: [-z, y]; ...).
+    at: [f32; 2],
+}
+
+fn calibrate(r: &mut Reference, c: &[CalPoint; 2], pixel_scale: [f32; 2]) -> Result<()> {
+    let p = |c: &CalPoint| (polly_core::glam::Vec2::new(c.pixel[0] * pixel_scale[0], c.pixel[1] * pixel_scale[1]), polly_core::glam::Vec2::from(c.at));
+    Ok(r.calibrate(p(&c[0]), p(&c[1]))?)
 }
 
 fn add_reference(ctx: &mut Ctx, a: AddReference) -> Result<Out> {
@@ -129,6 +180,14 @@ fn add_reference(ctx: &mut Ctx, a: AddReference) -> Result<Out> {
     r.layer = a.layer.unwrap_or_default();
     if let Some(o) = a.opacity {
         r.opacity = o;
+    }
+    r.flip = a.flip;
+    if let Some(c) = &a.calibrate {
+        if a.center.is_some() || a.height.is_some() {
+            anyhow::bail!("give either calibrate or center/height");
+        }
+        let (fw, fh) = image::image_dimensions(&a.path)?;
+        calibrate(&mut r, c, [w0 as f32 / fw as f32, h0 as f32 / fh as f32])?;
     }
     let replaced = ctx.doc.scene.references.iter().any(|x| x.name == r.name);
     let name = r.name.clone();
@@ -166,6 +225,9 @@ struct UpdateReference {
     layer: Option<Layer>,
     opacity: Option<f32>,
     visible: Option<bool>,
+    flip: Option<bool>,
+    /// Re-place by two known points (stored image pixels -> view coordinates).
+    calibrate: Option<[CalPoint; 2]>,
 }
 
 fn update_reference(ctx: &mut Ctx, a: UpdateReference) -> Result<Out> {
@@ -199,6 +261,13 @@ fn update_reference(ctx: &mut Ctx, a: UpdateReference) -> Result<Out> {
         if let Some(v) = a.visible {
             r.visible = v;
         }
+        if let Some(f) = a.flip {
+            r.flip = f;
+        }
+        if let Some(c) = &a.calibrate {
+            let p = |c: &CalPoint| (polly_core::glam::Vec2::from(c.pixel), polly_core::glam::Vec2::from(c.at));
+            r.calibrate(p(&c[0]), p(&c[1]))?;
+        }
         Ok(s.set_reference(r)?)
     })?;
     Ok(Out::json(ref_json(ctx.doc.scene.reference(&a.name)?)))
@@ -223,4 +292,151 @@ struct Empty {}
 
 fn list_references(ctx: &mut Ctx, _: Empty) -> Result<Out> {
     Ok(Out::json(json!({"references": ctx.doc.scene.references.iter().map(ref_json).collect::<Vec<_>>()})))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MeasureRef {
+    name: String,
+    /// Heights to measure at, as view v coordinates (front/back/left/right: y; top: -z; bottom: z).
+    heights: Option<Vec<f32>>,
+    /// Colour distance from the background that counts as drawing (0-441, default 60).
+    threshold: Option<f32>,
+}
+
+/// The drawing's vertical extent: (top v, bottom v) of rows with ink.
+fn ink_rows(r: &Reference, bg: [u8; 4], th: f32) -> Option<(f32, f32)> {
+    let [_, y0, _, h] = r.rect();
+    let rows: Vec<u32> = (y0..y0 + h).filter(|y| r.ink_span(*y, bg, th).is_some()).collect();
+    let (top, bottom) = (*rows.first()?, *rows.last()?);
+    Some((r.pixel_to_view(0.0, top as f32).y, r.pixel_to_view(0.0, bottom as f32 + 1.0).y))
+}
+
+fn measure_reference(ctx: &mut Ctx, a: MeasureRef) -> Result<Out> {
+    let r = ctx.doc.scene.reference(&a.name)?;
+    let th = a.threshold.unwrap_or(60.0);
+    let bg = r.background();
+    let (top, bottom) = ink_rows(r, bg, th).context("no drawing found (everything looks like the background; try a lower threshold)")?;
+    let heights = a.heights.clone().unwrap_or_else(|| (0..12).map(|i| bottom + (top - bottom) * (i as f32 + 0.5) / 12.0).collect());
+    let (u_axis, _) = axis(r.view.axes().0);
+    let (v_axis, vs) = axis(r.view.axes().1);
+    let rows: Vec<Value> = heights
+        .iter()
+        .map(|v| match r.edges_at(*v, bg, th) {
+            Some((lo, hi)) => json!({v_axis: r4(*v * vs), u_axis: world_range(r.view, lo, hi), "width": r4(hi - lo)}),
+            None => json!({v_axis: r4(*v * vs), u_axis: Value::Null}),
+        })
+        .collect();
+    Ok(Out::json(json!({
+        "reference": r.name,
+        "drawing": {format!("{v_axis}_range"): [r4((bottom * vs).min(top * vs)), r4((bottom * vs).max(top * vs))]},
+        "rows": rows,
+    })))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CompareRef {
+    name: String,
+    /// Objects to compare (default: everything shown).
+    objects: Option<Vec<String>>,
+    /// Heights to report (view v coordinates; default 16 evenly over the drawing).
+    heights: Option<Vec<f32>>,
+    /// Colour distance from the background that counts as drawing (default 60).
+    threshold: Option<f32>,
+}
+
+fn compare_reference(ctx: &mut Ctx, a: CompareRef) -> Result<Out> {
+    use polly_core::glam::{Vec2, Vec3};
+    let s = &ctx.doc.scene;
+    let r = s.reference(&a.name)?.clone();
+    let th = a.threshold.unwrap_or(60.0);
+    let bg = r.background();
+    let (top, bottom) = ink_rows(&r, bg, th).context("no drawing found in the reference")?;
+    // The model as shown (active variants, static pose), as world triangles.
+    let shown = polly_core::variants::display(s, &[], &Default::default());
+    let ids: Vec<u32> = match &a.objects {
+        Some(ns) => ns.iter().map(|n| s.resolve(Some(n))).collect::<polly_core::Result<_>>()?,
+        None => shown.objects.iter().filter(|(_, o)| o.visible).map(|(id, _)| *id).collect(),
+    };
+    let mut tris: Vec<[Vec3; 3]> = Vec::new();
+    for id in &ids {
+        let o = &shown.objects[id];
+        let m = shown.world_matrix(*id);
+        for f in o.mesh.faces.values() {
+            let pts: Vec<Vec3> = o.mesh.face_positions(f).iter().map(|p| m.transform_point3(*p)).collect();
+            for [i, j, k] in polly_core::geom::triangulate_polygon(&pts) {
+                tris.push([pts[i], pts[j], pts[k]]);
+            }
+        }
+    }
+    if tris.is_empty() {
+        bail!("nothing to compare: no faces shown");
+    }
+    let (u, v) = r.view.axes();
+    let model_at = |h: f32| polly_core::geom::slice_extent(&tris, u, v, h);
+    let (u_axis, us) = axis(u);
+    let (v_axis, vs) = axis(v);
+    let heights = a.heights.clone().unwrap_or_else(|| (0..16).map(|i| bottom + (top - bottom) * (i as f32 + 0.5) / 16.0).collect());
+    let side = |sign: f32| format!("{}{u_axis}", if sign > 0.0 { "+" } else { "-" });
+    let (lo_name, hi_name) = (side(-us), side(us));
+    let mut worst: f32 = 0.0;
+    let rows: Vec<Value> = heights
+        .iter()
+        .map(|h| {
+            let mut j = json!({v_axis: r4(*h * vs)});
+            match (r.edges_at(*h, bg, th), model_at(*h)) {
+                (Some((dl, dh)), Some((ml, mh))) => {
+                    // Positive = the model sticks out past the drawing on that side.
+                    let (out_lo, out_hi) = (dl - ml, mh - dh);
+                    worst = worst.max(out_lo.abs()).max(out_hi.abs());
+                    j["sticks_out"] = json!({lo_name.as_str(): r4(out_lo), hi_name.as_str(): r4(out_hi)});
+                    j["drawing"] = json!(world_range(r.view, dl, dh));
+                    j["model"] = json!(world_range(r.view, ml, mh));
+                }
+                (Some((dl, dh)), None) => {
+                    j["note"] = json!("model missing here");
+                    j["drawing"] = json!(world_range(r.view, dl, dh));
+                }
+                (None, Some((ml, mh))) => {
+                    j["note"] = json!("model where the drawing has nothing");
+                    j["model"] = json!(world_range(r.view, ml, mh));
+                }
+                (None, None) => {}
+            }
+            j
+        })
+        .collect();
+    // Picture over the crop: reference faded, red = model only, blue = drawing only.
+    let [x0, y0, w, h] = r.rect();
+    let k = (384.0 / h.max(w) as f32).min(1.0);
+    let (iw, ih) = (((w as f32 * k).round() as u32).max(1), ((h as f32 * k).round() as u32).max(1));
+    let mut img = image::RgbaImage::new(iw, ih);
+    for iy in 0..ih {
+        let sy = y0 + ((iy as f32 + 0.5) / k) as u32;
+        let vrow = r.pixel_to_view(0.0, sy as f32 + 0.5).y;
+        let drawing = r.ink_span(sy.min(y0 + h - 1), bg, th);
+        let model = model_at(vrow).map(|(a, b)| (r.view_to_pixel(Vec2::new(a, vrow)).x, r.view_to_pixel(Vec2::new(b, vrow)).x));
+        for ix in 0..iw {
+            let sx = x0 + ((ix as f32 + 0.5) / k) as u32;
+            let i = ((sy.min(y0 + h - 1) * r.width + sx.min(x0 + w - 1)) * 4) as usize;
+            let p = &r.pixels[i..i + 4];
+            let fade = |c: u8| (255.0 - (255.0 - c as f32) * 0.35) as u8;
+            let fx = sx as f32 + 0.5;
+            let in_d = drawing.is_some_and(|(a, b)| fx >= a as f32 && fx <= b as f32 + 1.0);
+            let in_m = model.is_some_and(|(a, b)| fx >= a.min(b) && fx <= a.max(b));
+            let c = match (in_m, in_d) {
+                (true, false) => [230, 60, 50, 255],
+                (false, true) => [60, 110, 230, 255],
+                (true, true) => [fade(p[0]).saturating_sub(40), fade(p[1]).saturating_sub(40), fade(p[2]).saturating_sub(40), 255],
+                _ => [fade(p[0]), fade(p[1]), fade(p[2]), 255],
+            };
+            img.put_pixel(ix, iy, image::Rgba(c));
+        }
+    }
+    Ok(Out::json(json!({
+        "reference": r.name,
+        "max_error": r4(worst),
+        "sides": {"sticks_out": format!("+ = the model extends past the drawing on that side ({lo_name} / {hi_name}); - = it falls short")},
+        "rows": rows,
+    }))
+    .with_image(super::view::png(&img)?))
 }
