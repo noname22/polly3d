@@ -2,12 +2,12 @@
 //!
 //! Usage: polly [--viewer | --no-viewer] [--project FILE]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use polly_core::document::Document;
 use polly_mcp::PollyServer;
 use polly_mcp::services::Services;
+use polly_mcp::workspace::{SceneSlot, Workspace};
 use rmcp::ServiceExt;
 
 mod viewer;
@@ -50,16 +50,16 @@ fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "polly=info,warn".into()))
         .init();
     let args = parse_args()?;
-    let mut doc = Document::new();
     let services = Arc::new(Services::default());
+    let mut main_scene = SceneSlot::default();
     if let Some(p) = &args.project {
         if p.exists() {
             let bytes = std::fs::read(p)?;
-            doc.replace(polly_export::load_project(&bytes)?);
+            main_scene.doc.replace(polly_export::load_project(&bytes)?);
         }
-        services.settings.lock().unwrap().project_path = Some(p.clone());
+        main_scene.project_path = Some(p.clone());
     }
-    let doc = Arc::new(Mutex::new(doc));
+    let workspace = Arc::new(Workspace::with_main(main_scene));
     // The window event loop has to live on the main thread for the whole
     // process; it costs nothing while no window is open.
     let event_loop = if args.no_viewer {
@@ -79,7 +79,7 @@ fn main() -> Result<()> {
             }
         }
     };
-    let server = PollyServer::new(doc.clone(), services.clone());
+    let server = PollyServer::new(workspace.clone(), services.clone());
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let serve = async move {
@@ -97,7 +97,7 @@ fn main() -> Result<()> {
                 }
                 std::process::exit(0);
             });
-            if let Err(e) = viewer::run(el, doc, args.viewer) {
+            if let Err(e) = viewer::run(el, workspace, services, args.viewer) {
                 tracing::error!("viewer: {e:#}; continuing without it");
             }
             rt.block_on(std::future::pending::<()>());

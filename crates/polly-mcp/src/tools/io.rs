@@ -11,8 +11,8 @@ use crate::registry::{Ctx, Out, ToolDef, def};
 
 pub fn tools() -> Vec<ToolDef> {
     vec![
-        def("save_project", "Save the whole scene (meshes, materials, textures, palettes) to a .polly file.", true, save),
-        def("load_project", "Load a .polly project, replacing the current scene (clears undo history).", false, load),
+        def("save_project", "Save the scene (meshes, materials, textures, palettes) to a .polly file.", true, save),
+        def("load_project", "Load a .polly project into the scene, replacing its contents (clears its undo history).", false, load),
         def(
             "export_glb",
             "Export to binary glTF (.glb) with embedded textures; texture filtering (nearest/linear) is carried in the sampler. Optionally only some objects (with their children).",
@@ -31,7 +31,7 @@ struct PathArg {
 fn project_path(ctx: &Ctx, p: &Option<String>) -> Result<PathBuf> {
     match p {
         Some(p) => Ok(PathBuf::from(p)),
-        None => ctx.services.settings.lock().unwrap().project_path.clone().context("no path given and no project path known yet"),
+        None => ctx.project_path.clone().context("no path given and no project path known yet for this scene"),
     }
 }
 
@@ -42,7 +42,7 @@ fn save(ctx: &mut Ctx, a: PathArg) -> Result<Out> {
     }
     let bytes = save_project(&ctx.doc.scene)?;
     std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
-    ctx.services.settings.lock().unwrap().project_path = Some(path.clone());
+    *ctx.project_path = Some(path.clone());
     Ok(ok(format!("saved {} ({} bytes)", std::path::absolute(&path)?.display(), bytes.len())))
 }
 
@@ -51,7 +51,7 @@ fn load(ctx: &mut Ctx, a: PathArg) -> Result<Out> {
     let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
     let scene = load_project(&bytes)?;
     ctx.doc.replace(scene);
-    ctx.services.settings.lock().unwrap().project_path = Some(path.clone());
+    *ctx.project_path = Some(path.clone());
     Ok(Out::json(json!({"loaded": path.display().to_string(), "objects": ctx.doc.scene.objects.len()})))
 }
 

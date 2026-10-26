@@ -11,7 +11,8 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::services::Services;
+use crate::services::{LastView, Services};
+use crate::workspace::Workspace;
 
 /// Tool output: a JSON report plus optional PNG images.
 #[derive(Default)]
@@ -46,6 +47,11 @@ impl Out {
 
 pub struct Ctx<'a> {
     pub doc: &'a mut Document,
+    /// Name of the scene this call works in.
+    pub scene: &'a str,
+    pub last_view: &'a mut Option<LastView>,
+    pub project_path: &'a mut Option<std::path::PathBuf>,
+    pub workspace: &'a Workspace,
     pub services: &'a Services,
 }
 
@@ -66,6 +72,7 @@ where
     let original = serde_json::Value::Object((*schema).clone());
     let mut sv = original.clone();
     crate::colors::widen_schema(&mut sv);
+    add_scene_property(&mut sv);
     let schema = Arc::new(sv.as_object().unwrap().clone());
     let mut annotations = ToolAnnotations::new();
     annotations.read_only_hint = Some(read_only);
@@ -81,6 +88,19 @@ where
             f(ctx, args)
         }),
     }
+}
+
+/// Every tool takes an optional `scene`; `PollyServer::call` strips it
+/// before the tool's own arguments are parsed.
+fn add_scene_property(schema: &mut serde_json::Value) {
+    let props = schema.as_object_mut().unwrap().entry("properties").or_insert_with(|| serde_json::json!({}));
+    props.as_object_mut().unwrap().insert(
+        "scene".into(),
+        serde_json::json!({
+            "type": "string",
+            "description": "Scene to work in (default \"main\"). Use create_scene to get a separate scene, e.g. one per subagent; then pass it on every call.",
+        }),
+    );
 }
 
 pub struct Registry {

@@ -1,15 +1,15 @@
 //! Drive the tool layer like an agent would.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use polly_core::document::Document;
 use polly_mcp::PollyServer;
 use polly_mcp::services::Services;
+use polly_mcp::workspace::Workspace;
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 
 fn server() -> PollyServer {
-    PollyServer::new(Arc::new(Mutex::new(Document::new())), Arc::new(Services::default()))
+    PollyServer::new(Arc::new(Workspace::default()), Arc::new(Services::default()))
 }
 
 fn text(r: &CallToolResult) -> String {
@@ -45,6 +45,7 @@ fn all_tool_schemas_build() {
     assert!(tools.len() > 50);
     for t in &tools {
         assert_eq!(t.input_schema.get("type"), Some(&json!("object")), "{}", t.name);
+        assert!(t.input_schema["properties"].get("scene").is_some(), "{} lacks `scene`", t.name);
     }
     // colour widening reached nested Fill schemas
     let ff = tools.iter().find(|t| t.name == "fill_faces").unwrap();
@@ -71,7 +72,7 @@ fn model_a_crate() {
     assert_eq!(faces["next_offset"], 3);
     call(&s, "mirror", json!({"axis": "x"}));
     call(&s, "checkpoint", json!({"name": "a"}));
-    call(&s, "new_scene", json!({}));
+    call(&s, "clear_scene", json!({}));
     call(&s, "restore", json!({"name": "a"}));
     let sc = call(&s, "describe_scene", json!({}));
     assert_eq!(sc["objects"].as_array().unwrap().len(), 1);
@@ -122,7 +123,7 @@ fn paint_flow_with_hex_and_palette_colours() {
     assert!(std::fs::metadata(&glb).unwrap().len() > 100);
     let proj = dir.join("p.polly");
     call(&s, "save_project", json!({"path": proj.to_str().unwrap()}));
-    call(&s, "new_scene", json!({}));
+    call(&s, "clear_scene", json!({}));
     call(&s, "load_project", json!({}));
     assert_eq!(call(&s, "describe_scene", json!({}))["textures"].as_array().unwrap().len(), 1);
     std::fs::remove_dir_all(dir).ok();
@@ -176,4 +177,85 @@ fn render_pick_and_paint_stroke() {
     call(&s, "set_auto_preview", json!({"size": 128}));
     let r = s.call("extrude", json!({"elements": ["f3"], "distance": 0.3}));
     assert_eq!(images(&r).len(), 1);
+}
+
+#[test]
+fn scenes_are_isolated() {
+    let s = server();
+    let a = call(&s, "create_scene", json!({"name": "a"}))["scene"].as_str().unwrap().to_string();
+    let b = call(&s, "create_scene", json!({}))["scene"].as_str().unwrap().to_string();
+    assert_eq!(b, "scene-1");
+    call(&s, "add_primitive", json!({"scene": a, "shape": {"kind": "cube"}, "name": "Box"}));
+    call(&s, "add_primitive", json!({"scene": b, "shape": {"kind": "torus"}, "name": "Ring"}));
+    call(&s, "select", json!({"scene": a, "query": {"by": "all"}}));
+    // main is untouched, and names resolve only within their scene
+    assert!(call(&s, "describe_scene", json!({}))["objects"].as_array().unwrap().is_empty());
+    let e = call_err(&s, "describe_mesh", json!({"scene": b, "object": "Box"}));
+    assert!(e.contains("Box"), "{e}");
+    // undo is per scene
+    call(&s, "undo", json!({"scene": a}));
+    assert!(call(&s, "describe_scene", json!({"scene": a}))["objects"].as_array().unwrap().is_empty());
+    assert_eq!(call(&s, "describe_scene", json!({"scene": b}))["objects"].as_array().unwrap().len(), 1);
+    // pick camera is per scene
+    let r = s.call("render", json!({"scene": b}));
+    if r.is_error != Some(true) {
+        let e = call_err(&s, "pick", json!({"scene": a, "x": 10, "y": 10}));
+        assert!(e.contains("nothing rendered"), "{e}");
+        call(&s, "pick", json!({"scene": b, "x": 256, "y": 256}));
+    }
+    let l = call(&s, "list_scenes", json!({}));
+    let names: Vec<_> = l["scenes"].as_array().unwrap().iter().map(|r| r["scene"].as_str().unwrap()).collect();
+    assert_eq!(names, ["a", "main", "scene-1"]);
+    // errors
+    let e = call_err(&s, "describe_scene", json!({"scene": "nope"}));
+    assert!(e.contains("unknown scene 'nope'") && e.contains("scene-1"), "{e}");
+    assert!(call_err(&s, "create_scene", json!({"name": "a"})).contains("already exists"));
+    assert!(call_err(&s, "delete_scene", json!({"name": "main"})).contains("cannot be deleted"));
+    call(&s, "delete_scene", json!({"name": "a"}));
+    call_err(&s, "describe_scene", json!({"scene": "a"}));
+}
+
+/// Many subagents at once, each in its own scene.
+#[test]
+fn parallel_scenes() {
+    let s = server();
+    let gpu = s.call("render", json!({})).is_error != Some(true);
+    let names: Vec<String> = (0..8).map(|_| call(&s, "create_scene", json!({}))["scene"].as_str().unwrap().to_string()).collect();
+    let handles: Vec<_> = names
+        .iter()
+        .cloned()
+        .map(|sc| {
+            let s = s.clone();
+            std::thread::spawn(move || {
+                let c = |name: &str, mut args: Value| {
+                    args["scene"] = json!(sc);
+                    call(&s, name, args)
+                };
+                c("add_primitive", json!({"shape": {"kind": "cube"}, "name": "Box"}));
+                c("select", json!({"query": {"by": "normal", "direction": [0, 1, 0]}}));
+                c("extrude", json!({"distance": 0.5}));
+                c("auto_seams", json!({}));
+                c("unwrap", json!({"texture_size": [32, 32]}));
+                c("create_texture", json!({"name": "T", "width": 32, "height": 32, "material": "M", "object": "Box"}));
+                c("fill_faces", json!({"elements": ["all"], "fill": {"type": "solid", "color": "#ff004d"}}));
+                if gpu {
+                    c("render", json!({"width": 128, "height": 128}));
+                }
+                c("describe_scene", json!({}))
+            })
+        })
+        .collect();
+    for h in handles {
+        let d = h.join().unwrap();
+        let objs = d["objects"].as_array().unwrap();
+        assert_eq!(objs.len(), 1, "{d}");
+        assert_eq!(objs[0]["name"], "Box");
+        assert_eq!(objs[0]["faces"], 10);
+    }
+    if gpu {
+        let r = s.call("render_overview", json!({"tile_size": 128}));
+        let t: Value = serde_json::from_str(&text(&r)).unwrap();
+        assert_eq!(t["tiles"].as_array().unwrap().len(), 9);
+        std::fs::write(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("overview.png"), &images(&r)[0]).unwrap();
+    }
 }

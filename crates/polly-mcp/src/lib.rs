@@ -4,10 +4,11 @@ pub mod colors;
 pub mod registry;
 pub mod services;
 pub mod tools;
+pub mod overview;
+pub mod workspace;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use polly_core::document::Document;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, ListToolsResult,
     PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
@@ -17,6 +18,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler};
 
 use crate::registry::{Ctx, Registry};
 use crate::services::Services;
+use crate::workspace::{SceneSlot, Workspace};
 
 pub const INSTRUCTIONS: &str = r#"Polly3D is a low-poly 3-D modeller you drive entirely through these tools.
 
@@ -37,19 +39,20 @@ Workflow that works well
 6. save_project, export_glb.
 
 The user may ask to watch live: show_viewer opens a window on their screen, hide_viewer closes it. Don't open it unasked.
-Subagents share this one scene: when several work in parallel, give each its own object and pass explicit `object` and element ids instead of relying on the selection.
+Scenes: everything above happens in a scene ("main" unless a tool call passes `scene`). Each scene has its own objects, selection, undo history and render camera.
+To build unrelated models in parallel (e.g. one per subagent), call create_scene once per model and tell each subagent to pass `scene: "<its name>"` on EVERY call. render_overview shows all scenes in one image; list_scenes lists them. Subagents sharing one scene should each work on their own object and pass explicit `object` and element ids.
 "#;
 
 #[derive(Clone)]
 pub struct PollyServer {
-    pub doc: Arc<Mutex<Document>>,
+    pub workspace: Arc<Workspace>,
     pub services: Arc<Services>,
     registry: Arc<Registry>,
 }
 
 impl PollyServer {
-    pub fn new(doc: Arc<Mutex<Document>>, services: Arc<Services>) -> Self {
-        PollyServer { doc, services, registry: Arc::new(tools::registry()) }
+    pub fn new(workspace: Arc<Workspace>, services: Arc<Services>) -> Self {
+        PollyServer { workspace, services, registry: Arc::new(tools::registry()) }
     }
 
     pub fn tools(&self) -> Vec<Tool> {
@@ -61,9 +64,27 @@ impl PollyServer {
         let Some(def) = self.registry.get(name) else {
             return CallToolResult::error(vec![ContentBlock::text(format!("unknown tool '{name}'"))]);
         };
-        let mut doc = self.doc.lock().unwrap_or_else(|e| e.into_inner());
-        let mut ctx = Ctx { doc: &mut doc, services: &self.services };
-        let args = if args.is_null() { serde_json::json!({}) } else { args };
+        let mut args = if args.is_null() { serde_json::json!({}) } else { args };
+        let scene = match args.as_object_mut().and_then(|m| m.remove("scene")) {
+            None | Some(serde_json::Value::Null) => workspace::MAIN.to_string(),
+            Some(serde_json::Value::String(s)) => s,
+            Some(other) => return CallToolResult::error(vec![ContentBlock::text(format!("error: `scene` must be a string, got {other}"))]),
+        };
+        let slot = match self.workspace.get(&scene) {
+            Ok(s) => s,
+            Err(e) => return CallToolResult::error(vec![ContentBlock::text(format!("error: {e}"))]),
+        };
+        // Only this scene is locked: calls in other scenes proceed in parallel.
+        let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let SceneSlot { doc, last_view, project_path } = &mut *guard;
+        let mut ctx = Ctx {
+            doc,
+            scene: &scene,
+            last_view,
+            project_path,
+            workspace: &self.workspace,
+            services: &self.services,
+        };
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (def.call)(&mut ctx, args))) {
             Ok(Ok(out)) => CallToolResult::success(out.into_content()),
             Ok(Err(e)) => CallToolResult::error(vec![ContentBlock::text(format!("error: {e:#}"))]),

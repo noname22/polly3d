@@ -5,6 +5,7 @@ pub mod io;
 pub mod paint;
 pub mod query;
 pub mod scene;
+pub mod scenes;
 pub mod uv;
 pub mod view;
 
@@ -12,6 +13,7 @@ use crate::registry::Registry;
 
 pub fn registry() -> Registry {
     let mut tools = Vec::new();
+    tools.extend(scenes::tools());
     tools.extend(scene::tools());
     tools.extend(query::tools());
     tools.extend(edit::tools());

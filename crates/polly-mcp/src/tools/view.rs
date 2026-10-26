@@ -47,7 +47,7 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         def(
             "show_viewer",
-            "Open the live viewer window on the user's screen, which mirrors the scene as you edit (the user can orbit/zoom it). Only open it when the user wants to watch; it does not change what render returns.",
+            "Open the live viewer window on the user's screen. It mirrors edits as they happen: an overview grid of all scenes (the user can click one to view it alone), or one scene given by `show`. Only open it when the user wants to watch; it does not change what render returns.",
             true,
             show_viewer,
         ),
@@ -110,8 +110,8 @@ pub fn png(img: &image::RgbaImage) -> Result<Vec<u8>> {
     Ok(out.into_inner())
 }
 
-fn report(ctx: &Ctx, r: &Rendered) -> Result<Out> {
-    *ctx.services.last_view.lock().unwrap() = Some(LastView { camera: r.camera.clone(), tiles: r.tiles.clone() });
+fn report(ctx: &mut Ctx, r: &Rendered) -> Result<Out> {
+    *ctx.last_view = Some(LastView { camera: r.camera.clone(), tiles: r.tiles.clone() });
     let c = &r.camera;
     let mut j = json!({
         "view": c.view,
@@ -173,7 +173,7 @@ fn uv_layout(ctx: &mut Ctx, a: UvLayout) -> Result<Out> {
 
 /// Camera for a pixel of the last render (resolving contact-sheet tiles).
 fn camera_at(ctx: &Ctx, x: f32, y: f32) -> Result<(CameraInfo, f32, f32)> {
-    let lv = ctx.services.last_view.lock().unwrap().clone().context("nothing rendered yet; call render first")?;
+    let lv = ctx.last_view.clone().context("nothing rendered in this scene yet; call render first")?;
     if lv.tiles.is_empty() {
         return Ok((lv.camera, x, y));
     }
@@ -299,7 +299,7 @@ pub fn maybe_preview(ctx: &mut Ctx, object: ObjectId, out: Out) -> Result<Out> {
     let o = RenderOptions { focus: Some(vec![object]), ..RenderOptions::default().with_size(size, size) };
     match ctx.services.renderer().and_then(|mut r| r.render(&ctx.doc.scene, &o)) {
         Ok(r) => {
-            *ctx.services.last_view.lock().unwrap() = Some(LastView { camera: r.camera.clone(), tiles: vec![] });
+            *ctx.last_view = Some(LastView { camera: r.camera.clone(), tiles: vec![] });
             Ok(out.with_image(png(&r.image)?))
         }
         Err(e) => {
@@ -311,14 +311,27 @@ pub fn maybe_preview(ctx: &mut Ctx, object: ObjectId, out: Out) -> Result<Out> {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct NoArgs {}
-
-fn show_viewer(ctx: &mut Ctx, _: NoArgs) -> Result<Out> {
-    ctx.services.viewer(true)?;
-    Ok(ok("viewer window open"))
+struct ShowViewer {
+    /// Open on this scene's view. Default: the overview of all scenes (or "main" if it is the only scene).
+    /// Note: this is not the generic `scene` argument; it picks what the window shows.
+    show: Option<String>,
 }
 
+fn show_viewer(ctx: &mut Ctx, a: ShowViewer) -> Result<Out> {
+    if let Some(s) = &a.show {
+        ctx.workspace.get(s)?;
+    }
+    ctx.services.viewer(Some(a.show.clone()))?;
+    Ok(ok(match a.show {
+        Some(s) => format!("viewer window open on scene '{s}'"),
+        None => "viewer window open".into(),
+    }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct NoArgs {}
+
 fn hide_viewer(ctx: &mut Ctx, _: NoArgs) -> Result<Out> {
-    ctx.services.viewer(false)?;
+    ctx.services.viewer(None)?;
     Ok(ok("viewer window closed"))
 }

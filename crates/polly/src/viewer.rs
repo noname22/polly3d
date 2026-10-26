@@ -1,47 +1,41 @@
-//! Live viewer: a read-only window mirroring the document while the agent works.
+//! Live viewer: a read-only window mirroring the scenes while the agent works.
 //! The event loop runs for the whole process, but the window only exists
 //! while the agent has opened it (`show_viewer`) and the user hasn't closed it.
 //!
-//! Mouse: left-drag orbits, wheel zooms. Keys: 1 front, 2 right, 3 top, 4 persp,
-//! W wireframe, G grid, S selection, F cycle texture filter (texture / nearest /
-//! linear), R reset camera.
+//! With several scenes the window starts on an overview grid; clicking a tile
+//! opens that scene alone, and "< Back" (or Backspace/Esc) returns to the grid.
+//! Frames are rendered by the shared offscreen renderer and presented with
+//! softbuffer, so buttons and captions are plain CPU drawing.
+//!
+//! Single-scene view: left-drag orbits, wheel zooms. Keys: 1 front, 2 right,
+//! 3 top, 4 persp, W wireframe, G grid, S selection, F cycle texture filter
+//! (texture / nearest / linear), R reset camera.
 
-use std::sync::{Arc, Mutex};
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use polly_core::document::Document;
+use image::RgbaImage;
 use polly_core::scene::Filter;
-use polly_mcp::services::ViewerCommand;
-use polly_render::{Overlays, RenderOptions, Renderer, View, wgpu};
+use polly_mcp::overview::{TileRect, layout, render_grid};
+use polly_mcp::services::{Services, ViewerCommand};
+use polly_mcp::workspace::{MAIN, Workspace};
+use polly_render::canvas::{self, Rect};
+use polly_render::{Overlays, RenderOptions, View};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
-use winit::raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle};
 use winit::window::{Window, WindowId};
 
-/// `OwnedDisplayHandle` with the `Debug` impl wgpu wants.
-struct Display(OwnedDisplayHandle);
+/// How long a frame may wait for a scene that a tool call is busy with.
+const SCENE_WAIT: Duration = Duration::from_millis(20);
 
-impl std::fmt::Debug for Display {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Display")
-    }
-}
-
-impl HasDisplayHandle for Display {
-    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        self.0.display_handle()
-    }
-}
-
-struct Gfx {
+struct Win {
     window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
-    renderer: Renderer,
+    surface: softbuffer::Surface<OwnedDisplayHandle, Arc<Window>>,
 }
 
 #[derive(Clone, Copy)]
@@ -50,16 +44,28 @@ enum Cam {
     Orbit { yaw: f32, pitch: f32 },
 }
 
+#[derive(Clone, PartialEq)]
+enum Mode {
+    Overview,
+    Single(String),
+}
+
 struct App {
-    doc: Arc<Mutex<Document>>,
-    instance: wgpu::Instance,
-    gfx: Option<Gfx>,
+    workspace: Arc<Workspace>,
+    services: Arc<Services>,
+    context: softbuffer::Context<OwnedDisplayHandle>,
+    win: Option<Win>,
+    /// Open at startup (from `--viewer`).
     start_open: bool,
+    mode: Mode,
     cam: Cam,
     zoom: f32,
     overlays: Overlays,
     filter: Option<Filter>,
-    seen_version: Option<u64>,
+    /// What the last frame showed: (list version, per-scene versions).
+    seen: Option<(u64, Vec<(String, u64)>)>,
+    tiles: Vec<TileRect>,
+    back: Option<Rect>,
     drag: Option<(f64, f64)>,
     cursor: (f64, f64),
     error: Option<String>,
@@ -76,89 +82,155 @@ impl App {
         }
     }
 
-    fn init(&mut self, el: &ActiveEventLoop) -> Result<()> {
+    /// The mode actually shown: a lone "main" scene skips the overview.
+    fn effective_mode(&self) -> Mode {
+        match &self.mode {
+            Mode::Overview if self.workspace.names().len() == 1 => Mode::Single(MAIN.into()),
+            m => m.clone(),
+        }
+    }
+
+    fn open(&mut self, el: &ActiveEventLoop) -> Result<()> {
+        if self.win.is_some() {
+            return Ok(());
+        }
         let attrs = Window::default_attributes().with_title("Polly3D viewer").with_inner_size(PhysicalSize::new(900, 700));
         let window = Arc::new(el.create_window(attrs)?);
-        let surface = self.instance.create_surface(window.clone())?;
-        let adapter = pollster::block_on(self.instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .context("no GPU adapter compatible with the window")?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("polly-viewer"),
-            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-            ..Default::default()
-        }))?;
-        let size = window.inner_size();
-        let mut config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .context("surface not supported by adapter")?;
-        // Prefer an sRGB format; the renderer encodes manually otherwise.
-        let caps = surface.get_capabilities(&adapter);
-        if let Some(f) = caps.formats.iter().find(|f| f.is_srgb()) {
-            config.format = *f;
-        }
-        surface.configure(&device, &config);
-        let renderer = Renderer::new(&self.instance, &adapter, device, queue);
-        self.gfx = Some(Gfx { window, surface, config, renderer });
+        let surface = softbuffer::Surface::new(&self.context, window.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.win = Some(Win { window, surface });
+        self.seen = None;
         Ok(())
     }
 
+    fn redraw(&self) {
+        if let Some(w) = &self.win {
+            w.window.request_redraw();
+        }
+    }
+
+    /// Scene versions relevant to the current mode, read without blocking.
+    fn signature(&self) -> Option<(u64, Vec<(String, u64)>)> {
+        let names = match self.effective_mode() {
+            Mode::Overview => self.workspace.names(),
+            Mode::Single(n) => vec![n],
+        };
+        let mut v = Vec::new();
+        for n in names {
+            let slot = self.workspace.get(&n).ok()?;
+            let g = slot.try_lock().ok()?;
+            v.push((n, g.doc.version));
+        }
+        Some((self.workspace.list_version(), v))
+    }
+
+    fn compose(&mut self, size: [u32; 2]) -> Result<Option<RgbaImage>> {
+        let mode = self.effective_mode();
+        let names = match &mode {
+            Mode::Overview => None,
+            Mode::Single(n) => Some(vec![n.clone()]),
+        };
+        let Ok((snaps, busy)) = self.workspace.snapshots(names.as_deref(), None, SCENE_WAIT) else {
+            // The scene being viewed was deleted.
+            self.mode = Mode::Overview;
+            return Ok(None);
+        };
+        if !busy.is_empty() && snaps.is_empty() {
+            return Ok(None); // try again next frame
+        }
+        let mut renderer = self.services.renderer()?;
+        self.tiles.clear();
+        self.back = None;
+        match mode {
+            Mode::Overview => {
+                let (cols, tile) = layout(snaps.len(), size[0], size[1]);
+                let (img, rects) = render_grid(&mut renderer, &self.services.tiles, &snaps, cols, tile.max(64), Some(size))?;
+                self.tiles = rects;
+                Ok(Some(img))
+            }
+            Mode::Single(name) => {
+                let opts = RenderOptions {
+                    view: self.view(),
+                    width: size[0],
+                    height: size[1],
+                    zoom: self.zoom,
+                    overlays: self.overlays.clone(),
+                    filter: self.filter,
+                    ..RenderOptions::default()
+                };
+                let mut img = renderer.render(&snaps[0].scene, &opts)?.image;
+                if self.workspace.names().len() > 1 {
+                    // Top-right: the legend occupies the top-left corner.
+                    let scale = if size[0] >= 600 { 2 } else { 1 };
+                    let b = canvas::label_rect("< Back", scale, 0.0, 0.0);
+                    let b = Rect { x: img.width() as i32 - b.w - 8, y: 8, ..b };
+                    canvas::boxed_label(&mut img, b, "< Back", scale, [40, 90, 160, 255], canvas::WHITE);
+                    let n = canvas::label_rect(&name, scale, 0.0, 0.0);
+                    let n = Rect { x: b.x - n.w - 6, y: 8, ..n };
+                    canvas::boxed_label(&mut img, n, &name, scale, [20, 20, 26, 220], canvas::WHITE);
+                    self.back = Some(b);
+                }
+                Ok(Some(img))
+            }
+        }
+    }
+
     fn draw(&mut self) {
-        let opts = RenderOptions {
-            view: self.view(),
-            zoom: self.zoom,
-            overlays: self.overlays.clone(),
-            filter: self.filter,
-            ..RenderOptions::default()
-        };
-        // Never block on the document: a tool call may hold it while waiting for us.
-        let Ok(d) = self.doc.try_lock() else {
-            self.redraw();
-            return;
-        };
-        let (scene, version) = (d.scene.clone(), d.version);
-        drop(d);
-        self.seen_version = Some(version);
-        let Some(g) = self.gfx.as_mut() else { return };
-        let frame = match g.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
-            _ => {
-                g.surface.configure(g.renderer.device(), &g.config);
+        let Some(size) = self.win.as_ref().map(|w| w.window.inner_size()) else { return };
+        let size = [size.width.max(1), size.height.max(1)];
+        let sig = self.signature();
+        let img = match self.compose(size) {
+            Ok(Some(img)) => img,
+            Ok(None) => {
+                self.redraw();
+                return;
+            }
+            Err(e) => {
+                if self.error.as_deref() != Some(&e.to_string()) {
+                    tracing::error!("viewer render failed: {e:#}");
+                    self.error = Some(e.to_string());
+                }
                 return;
             }
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let size = [g.config.width, g.config.height];
-        if let Err(e) = g.renderer.render_to_view(&scene, &opts, &view, g.config.format, size) {
-            if self.error.as_deref() != Some(&e.to_string()) {
-                tracing::error!("viewer render failed: {e:#}");
-                self.error = Some(e.to_string());
+        self.seen = sig;
+        // The renderer caps image size; centre smaller images on the background.
+        let (iw, ih) = (img.width().min(size[0]), img.height().min(size[1]));
+        let (ox, oy) = ((size[0] - iw) / 2, (size[1] - ih) / 2);
+        // Clicks are in window coordinates; shift hit rects by the centring offset.
+        for t in &mut self.tiles {
+            t.x += ox;
+            t.y += oy;
+        }
+        if let Some(b) = &mut self.back {
+            b.x += ox as i32;
+            b.y += oy as i32;
+        }
+        let title = match self.effective_mode() {
+            Mode::Overview => format!("Polly3D — {} scenes — click one to open it", self.workspace.names().len()),
+            Mode::Single(n) => {
+                let cam = match self.cam {
+                    Cam::Fixed(c) => c.to_string(),
+                    Cam::Orbit { yaw, pitch } => format!("orbit {yaw:.0}°/{pitch:.0}°"),
+                };
+                format!("Polly3D — {n} — {cam} — [1-4 views, drag orbit, wheel zoom, W/G/S/F/R]")
+            }
+        };
+        let Some(win) = self.win.as_mut() else { return };
+        let (Some(w), Some(h)) = (NonZeroU32::new(size[0]), NonZeroU32::new(size[1])) else { return };
+        if win.surface.resize(w, h).is_err() {
+            return;
+        }
+        let Ok(mut buf) = win.surface.buffer_mut() else { return };
+        buf.fill(0x0012_1317);
+        for y in 0..ih {
+            let row = ((y + oy) * size[0] + ox) as usize;
+            for x in 0..iw {
+                let p = img.get_pixel(x, y).0;
+                buf[row + x as usize] = (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32;
             }
         }
-        g.renderer.queue().present(frame);
-        let name = match self.cam {
-            Cam::Fixed(n) => n.to_string(),
-            Cam::Orbit { yaw, pitch } => format!("orbit {yaw:.0}°/{pitch:.0}°"),
-        };
-        let filt = match self.filter {
-            None => "texture filters",
-            Some(Filter::Nearest) => "nearest",
-            Some(Filter::Linear) => "linear",
-        };
-        g.window.set_title(&format!(
-            "Polly3D — {} objects — {name} — {filt} — [1-4 views, drag orbit, wheel zoom, W/G/S/F/R]",
-            scene.objects.len()
-        ));
-    }
-
-    fn redraw(&self) {
-        if let Some(g) = &self.gfx {
-            g.window.request_redraw();
-        }
+        let _ = buf.present();
+        win.window.set_title(&title);
     }
 
     fn orbit_from_current(&self) -> (f32, f32) {
@@ -170,13 +242,38 @@ impl App {
             Cam::Fixed(_) => (35.0, 25.0),
         }
     }
+
+    fn reset_camera(&mut self) {
+        self.cam = Cam::Fixed("persp");
+        self.zoom = 1.0;
+    }
+
+    fn click(&mut self) {
+        let (x, y) = self.cursor;
+        if let Some(b) = self.back {
+            if x >= b.x as f64 && y >= b.y as f64 && x < (b.x + b.w) as f64 && y < (b.y + b.h) as f64 {
+                self.mode = Mode::Overview;
+                self.redraw();
+                return;
+            }
+        }
+        if let Some(t) = self.tiles.iter().find(|t| t.contains(x, y)) {
+            self.mode = Mode::Single(t.scene.clone());
+            self.reset_camera();
+            self.redraw();
+            return;
+        }
+        if matches!(self.effective_mode(), Mode::Single(_)) {
+            self.drag = Some(self.cursor);
+        }
+    }
 }
 
 impl ApplicationHandler<ViewerCommand> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.start_open && self.gfx.is_none() {
+        if self.start_open {
             self.start_open = false;
-            if let Err(e) = self.init(el) {
+            if let Err(e) = self.open(el) {
                 tracing::error!("viewer unavailable: {e:#}");
             }
         }
@@ -184,14 +281,16 @@ impl ApplicationHandler<ViewerCommand> for App {
 
     fn user_event(&mut self, el: &ActiveEventLoop, cmd: ViewerCommand) {
         match cmd {
-            ViewerCommand::Show(reply) => {
-                let r = if self.gfx.is_some() { Ok(()) } else { self.init(el).map_err(|e| format!("{e:#}")) };
-                self.seen_version = None;
+            ViewerCommand::Show { scene, reply } => {
+                self.mode = scene.map_or(Mode::Overview, Mode::Single);
+                self.reset_camera();
+                let r = self.open(el).map_err(|e| format!("{e:#}"));
+                self.seen = None;
                 self.redraw();
                 let _ = reply.send(r);
             }
-            ViewerCommand::Hide(reply) => {
-                self.gfx = None;
+            ViewerCommand::Hide { reply } => {
+                self.win = None;
                 let _ = reply.send(Ok(()));
             }
         }
@@ -199,19 +298,13 @@ impl ApplicationHandler<ViewerCommand> for App {
 
     fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => self.gfx = None,
-            WindowEvent::Resized(size) => {
-                if let Some(g) = self.gfx.as_mut() {
-                    g.config.width = size.width.max(1);
-                    g.config.height = size.height.max(1);
-                    g.surface.configure(g.renderer.device(), &g.config);
-                }
-                self.redraw();
-            }
+            WindowEvent::CloseRequested => self.win = None,
+            WindowEvent::Resized(_) => self.redraw(),
             WindowEvent::RedrawRequested => self.draw(),
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                self.drag = (state == ElementState::Pressed).then_some(self.cursor);
-            }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
+                ElementState::Pressed => self.click(),
+                ElementState::Released => self.drag = None,
+            },
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
                 if let Some((x0, y0)) = self.drag {
@@ -222,7 +315,7 @@ impl ApplicationHandler<ViewerCommand> for App {
                     self.redraw();
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if matches!(self.effective_mode(), Mode::Single(_)) => {
                 let d = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
@@ -231,11 +324,16 @@ impl ApplicationHandler<ViewerCommand> for App {
                 self.redraw();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let single = matches!(self.effective_mode(), Mode::Single(_));
                 match event.logical_key.as_ref() {
-                    Key::Character("1") => self.cam = Cam::Fixed("front"),
-                    Key::Character("2") => self.cam = Cam::Fixed("right"),
-                    Key::Character("3") => self.cam = Cam::Fixed("top"),
-                    Key::Character("4") => self.cam = Cam::Fixed("persp"),
+                    Key::Named(NamedKey::Backspace | NamedKey::Escape) if single && self.back.is_some() => {
+                        self.mode = Mode::Overview
+                    }
+                    Key::Named(NamedKey::Escape) => self.win = None,
+                    Key::Character("1") if single => self.cam = Cam::Fixed("front"),
+                    Key::Character("2") if single => self.cam = Cam::Fixed("right"),
+                    Key::Character("3") if single => self.cam = Cam::Fixed("top"),
+                    Key::Character("4") if single => self.cam = Cam::Fixed("persp"),
                     Key::Character("w") => self.overlays.wireframe = !self.overlays.wireframe,
                     Key::Character("g") => self.overlays.grid = !self.overlays.grid,
                     Key::Character("s") => self.overlays.selection = !self.overlays.selection,
@@ -246,11 +344,7 @@ impl ApplicationHandler<ViewerCommand> for App {
                             Some(Filter::Linear) => None,
                         }
                     }
-                    Key::Character("r") | Key::Named(NamedKey::Home) => {
-                        self.cam = Cam::Fixed("persp");
-                        self.zoom = 1.0;
-                    }
-                    Key::Named(NamedKey::Escape) => self.gfx = None,
+                    Key::Character("r") | Key::Named(NamedKey::Home) => self.reset_camera(),
                     _ => return,
                 }
                 self.redraw();
@@ -260,12 +354,12 @@ impl ApplicationHandler<ViewerCommand> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        if self.gfx.is_none() {
+        if self.win.is_none() {
             el.set_control_flow(ControlFlow::Wait);
             return;
         }
-        if let Ok(d) = self.doc.try_lock() {
-            if self.seen_version != Some(d.version) {
+        if let Some(sig) = self.signature() {
+            if self.seen.as_ref() != Some(&sig) {
                 self.redraw();
             }
         }
@@ -280,19 +374,22 @@ pub fn event_loop() -> Result<EventLoop<ViewerCommand>> {
 
 /// Run the viewer event loop on the main thread. Opens the window right away
 /// only if `start_open`; otherwise it waits for `ViewerCommand::Show`.
-pub fn run(el: EventLoop<ViewerCommand>, doc: Arc<Mutex<Document>>, start_open: bool) -> Result<()> {
-    let display = Box::new(Display(el.owned_display_handle()));
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(display));
+pub fn run(el: EventLoop<ViewerCommand>, workspace: Arc<Workspace>, services: Arc<Services>, start_open: bool) -> Result<()> {
+    let context = softbuffer::Context::new(el.owned_display_handle()).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut app = App {
-        doc,
-        instance,
-        gfx: None,
+        workspace,
+        services,
+        context,
+        win: None,
         start_open,
+        mode: Mode::Overview,
         cam: Cam::Fixed("persp"),
         zoom: 1.0,
         overlays: Overlays::default(),
         filter: None,
-        seen_version: None,
+        seen: None,
+        tiles: vec![],
+        back: None,
         drag: None,
         cursor: (0.0, 0.0),
         error: None,

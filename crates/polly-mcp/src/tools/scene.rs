@@ -15,7 +15,7 @@ use crate::registry::{Ctx, Out, ToolDef, def};
 
 pub fn tools() -> Vec<ToolDef> {
     vec![
-        def("new_scene", "Discard everything and start an empty scene (undoable).", false, new_scene),
+        def("clear_scene", "Remove everything from this scene (undoable). To get an additional scene, use create_scene instead.", false, clear_scene),
         def(
             "describe_scene",
             "Overview of the scene: objects (with bounds, counts, transforms, parent), materials, textures, palettes, active object.",
@@ -85,12 +85,12 @@ pub fn tools() -> Vec<ToolDef> {
 #[derive(Deserialize, JsonSchema)]
 struct Empty {}
 
-fn new_scene(ctx: &mut Ctx, _: Empty) -> Result<Out> {
-    edit_scene(ctx, "new scene", |s| {
+fn clear_scene(ctx: &mut Ctx, _: Empty) -> Result<Out> {
+    edit_scene(ctx, "clear scene", |s| {
         *s = Scene::default();
         Ok(())
     })?;
-    Ok(ok("empty scene"))
+    Ok(ok(format!("scene '{}' is now empty", ctx.scene)))
 }
 
 pub fn object_summary(scene: &Scene, id: u32) -> serde_json::Value {
@@ -145,6 +145,7 @@ fn describe_scene(ctx: &mut Ctx, _: Empty) -> Result<Out> {
         .map(|(id, t)| json!({"id": format!("t{id}"), "name": t.name, "size": [t.width, t.height], "filter": t.filter, "palette": t.palette}))
         .collect();
     let mut j = json!({
+        "scene": ctx.scene,
         "active": s.active.and_then(|a| s.objects.get(&a)).map(|o| o.name.clone()),
         "objects": objects,
         "materials": materials,
