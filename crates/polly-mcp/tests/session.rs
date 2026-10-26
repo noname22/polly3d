@@ -102,6 +102,14 @@ fn paint_flow_with_hex_and_palette_colours() {
     let r = call(&s, "fill_faces", json!({"elements": ["all"], "fill": {"type": "checker", "a": "p0", "b": "#ff004d", "size_px": 2}}));
     assert_eq!(r["pixels_changed"], 64);
     call(&s, "draw", json!({"texture": "T", "shape": "line", "from": [0, 0], "to": [7, 7], "color": "white"}));
+    // colours nested in tuples (regression: palette indices used to be rejected here)
+    let r = call(&s, "paint_pixels", json!({"texture": "T", "pixels": [[1, 0, "p5"], [2, 0, "#29adff"], [3, 0, [0, 0, 0, 255]]]}));
+    assert_eq!(r["pixels_changed"], 3, "{r}");
+    let e = call_err(&s, "paint_pixels", json!({"texture": "T", "pixels": [[1, 0, "p99"]]}));
+    assert!(e.contains("p99"), "{e}");
+    // strings that are not colours stay untouched
+    call(&s, "rename_object", json!({"name": "p5"}));
+    call(&s, "rename_object", json!({"object": "p5", "name": "Plane"}));
     let r = s.call("get_texture", json!({"texture": "T"}));
     assert!(r.content.iter().any(|c| matches!(c, ContentBlock::Image(_))));
     let t = text(&r);

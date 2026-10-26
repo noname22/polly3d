@@ -63,7 +63,8 @@ where
 {
     let schema = rmcp::handler::server::common::schema_for_input::<A>()
         .unwrap_or_else(|e| panic!("schema for tool {name}: {e}"));
-    let mut sv = serde_json::Value::Object((*schema).clone());
+    let original = serde_json::Value::Object((*schema).clone());
+    let mut sv = original.clone();
     crate::colors::widen_schema(&mut sv);
     let schema = Arc::new(sv.as_object().unwrap().clone());
     let mut annotations = ToolAnnotations::new();
@@ -74,7 +75,7 @@ where
         tool,
         call: Box::new(move |ctx, mut args| {
             let palette = crate::tools::paint::args_palette(ctx, &args);
-            crate::colors::normalize(&mut args, palette.as_deref())?;
+            crate::colors::normalize(&mut args, &original, palette.as_deref())?;
             let args: A = serde_json::from_value(args)
                 .map_err(|e| anyhow::anyhow!("invalid arguments for {name}: {e}"))?;
             f(ctx, args)
