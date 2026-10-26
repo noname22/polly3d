@@ -106,6 +106,12 @@ pub struct Mesh {
     /// Hard edges for smooth shading.
     #[serde(default)]
     pub sharp: BTreeSet<Edge>,
+    /// Skin weights: per vertex, (bone, weight) pairs (see `anim`).
+    #[serde(default)]
+    pub weights: BTreeMap<VertId, Vec<(crate::anim::BoneId, f32)>>,
+    /// Morph targets (shape keys).
+    #[serde(default)]
+    pub morphs: Vec<crate::anim::Morph>,
     next_vert: VertId,
     next_face: FaceId,
 }
@@ -181,6 +187,16 @@ impl Mesh {
         }
         for e in &other.sharp {
             self.sharp.insert(Edge::new(vmap[&e.0], vmap[&e.1]));
+        }
+        for (v, list) in &other.weights {
+            self.weights.insert(vmap[v], list.clone());
+        }
+        for m in &other.morphs {
+            let offsets = m.offsets.iter().map(|(v, d)| (vmap[v], *d));
+            match self.morphs.iter_mut().find(|x| x.name == m.name) {
+                Some(x) => x.offsets.extend(offsets),
+                None => self.morphs.push(crate::anim::Morph { name: m.name.clone(), offsets: offsets.collect() }),
+            }
         }
         (vmap, faces)
     }

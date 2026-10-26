@@ -52,6 +52,17 @@ pub struct Object {
     /// The agent's current element selection on this object.
     #[serde(default)]
     pub selection: Selection,
+    #[serde(default)]
+    pub skeleton: Option<crate::anim::Skeleton>,
+    /// Static bone pose (what posing tools set; clips blend on top).
+    #[serde(default)]
+    pub pose: BTreeMap<crate::anim::BoneId, crate::anim::BonePose>,
+    /// Static morph weights by morph name.
+    #[serde(default)]
+    pub morph_weights: BTreeMap<String, f32>,
+    /// A morph target being edited, if any.
+    #[serde(default)]
+    pub morph_edit: Option<crate::anim::MorphEdit>,
 }
 
 fn yes() -> bool {
@@ -141,6 +152,10 @@ pub struct Scene {
     pub active: Option<ObjectId>,
     #[serde(default = "default_bg")]
     pub background: [f32; 4],
+    #[serde(default)]
+    pub clips: BTreeMap<crate::anim::ClipId, crate::anim::Clip>,
+    #[serde(default)]
+    next_clip: crate::anim::ClipId,
     next_object: ObjectId,
     next_material: MaterialId,
     next_texture: TextureId,
@@ -161,6 +176,8 @@ impl Default for Scene {
             palettes: BTreeMap::new(),
             active: None,
             background: default_bg(),
+            clips: BTreeMap::new(),
+            next_clip: 1,
             next_object: 1,
             next_material: 1,
             next_texture: 1,
@@ -189,6 +206,10 @@ impl Scene {
                 parent: None,
                 visible: true,
                 selection: Selection::default(),
+                skeleton: None,
+                pose: BTreeMap::new(),
+                morph_weights: BTreeMap::new(),
+                morph_edit: None,
             },
         );
         self.active = Some(id);
@@ -292,6 +313,21 @@ impl Scene {
             }
         }
         Err(Error::NotFound { kind: "material", id: name.to_string() })
+    }
+
+    pub fn add_clip(&mut self, c: crate::anim::Clip) -> crate::anim::ClipId {
+        let id = self.next_clip.max(1);
+        self.next_clip = id + 1;
+        self.clips.insert(id, c);
+        id
+    }
+
+    pub fn resolve_clip(&self, name: &str) -> Result<crate::anim::ClipId> {
+        self.clips
+            .iter()
+            .find(|(_, c)| c.name == name)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| Error::NotFound { kind: "clip", id: name.to_string() })
     }
 
     pub fn add_texture(&mut self, t: Texture) -> TextureId {
