@@ -46,6 +46,13 @@ pub fn tools() -> Vec<ToolDef> {
             paint_stroke,
         ),
         def(
+            "show_viewer",
+            "Open the live viewer window on the user's screen, which mirrors the scene as you edit (the user can orbit/zoom it). Only open it when the user wants to watch; it does not change what render returns.",
+            true,
+            show_viewer,
+        ),
+        def("hide_viewer", "Close the live viewer window.", true, hide_viewer),
+        def(
             "set_auto_preview",
             "Attach a small perspective preview image to the result of every geometry edit (size in px, 0 = off). Handy while iterating, costs image tokens.",
             false,
@@ -301,4 +308,17 @@ pub fn maybe_preview(ctx: &mut Ctx, object: ObjectId, out: Out) -> Result<Out> {
             Ok(out)
         }
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct NoArgs {}
+
+fn show_viewer(ctx: &mut Ctx, _: NoArgs) -> Result<Out> {
+    ctx.services.viewer(true)?;
+    Ok(ok("viewer window open"))
+}
+
+fn hide_viewer(ctx: &mut Ctx, _: NoArgs) -> Result<Out> {
+    ctx.services.viewer(false)?;
+    Ok(ok("viewer window closed"))
 }

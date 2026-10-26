@@ -1,6 +1,6 @@
 //! `polly` — Polly3D MCP server over stdio.
 //!
-//! Usage: polly [--viewer] [--project FILE]
+//! Usage: polly [--viewer | --no-viewer] [--project FILE]
 
 use std::sync::{Arc, Mutex};
 
@@ -13,19 +13,28 @@ use rmcp::ServiceExt;
 mod viewer;
 
 struct Args {
+    /// Open the viewer window at startup (otherwise only on `show_viewer`).
     viewer: bool,
+    /// Disable the viewer entirely (no display connection).
+    no_viewer: bool,
     project: Option<std::path::PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
-    let mut a = Args { viewer: false, project: None };
+    let mut a = Args { viewer: false, no_viewer: false, project: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--viewer" => a.viewer = true,
+            "--no-viewer" => a.no_viewer = true,
             "--project" => a.project = Some(it.next().context("--project needs a file")?.into()),
             "-h" | "--help" => {
-                eprintln!("polly [--viewer] [--project FILE]\n\nPolly3D low-poly modeller, an MCP server on stdio.");
+                eprintln!(
+                    "polly [--viewer | --no-viewer] [--project FILE]\n\n\
+                     Polly3D low-poly modeller, an MCP server on stdio.\n\
+                     The live viewer window opens when the agent calls show_viewer;\n\
+                     --viewer opens it at startup, --no-viewer disables it."
+                );
                 std::process::exit(0);
             }
             other => anyhow::bail!("unknown argument '{other}'"),
@@ -51,6 +60,25 @@ fn main() -> Result<()> {
         services.settings.lock().unwrap().project_path = Some(p.clone());
     }
     let doc = Arc::new(Mutex::new(doc));
+    // The window event loop has to live on the main thread for the whole
+    // process; it costs nothing while no window is open.
+    let event_loop = if args.no_viewer {
+        None
+    } else {
+        match viewer::event_loop() {
+            Ok(el) => {
+                let proxy = el.create_proxy();
+                services.set_viewer(Box::new(move |cmd| {
+                    proxy.send_event(cmd).map_err(|_| anyhow::anyhow!("the viewer has shut down"))
+                }));
+                Some(el)
+            }
+            Err(e) => {
+                tracing::info!("{e:#}; show_viewer will be unavailable");
+                None
+            }
+        }
+    };
     let server = PollyServer::new(doc.clone(), services.clone());
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -59,22 +87,22 @@ fn main() -> Result<()> {
         running.waiting().await?;
         anyhow::Ok(())
     };
-    if args.viewer {
-        // The window event loop must own the main thread; MCP runs on the runtime.
-        // When the client disconnects the whole process exits, window included.
-        rt.spawn(async move {
-            if let Err(e) = serve.await {
-                tracing::error!("mcp server: {e:#}");
+    match event_loop {
+        Some(el) => {
+            // MCP runs on the runtime; when the client disconnects the whole
+            // process exits, window included.
+            rt.spawn(async move {
+                if let Err(e) = serve.await {
+                    tracing::error!("mcp server: {e:#}");
+                }
+                std::process::exit(0);
+            });
+            if let Err(e) = viewer::run(el, doc, args.viewer) {
+                tracing::error!("viewer: {e:#}; continuing without it");
             }
-            std::process::exit(0);
-        });
-        if let Err(e) = viewer::run(doc) {
-            tracing::error!("viewer: {e:#}; continuing without it");
+            rt.block_on(std::future::pending::<()>());
+            Ok(())
         }
-        // Window closed: keep serving until the client disconnects.
-        rt.block_on(std::future::pending::<()>());
-        Ok(())
-    } else {
-        rt.block_on(serve)
+        None => rt.block_on(serve),
     }
 }

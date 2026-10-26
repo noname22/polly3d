@@ -1,4 +1,6 @@
 //! Live viewer: a read-only window mirroring the document while the agent works.
+//! The event loop runs for the whole process, but the window only exists
+//! while the agent has opened it (`show_viewer`) and the user hasn't closed it.
 //!
 //! Mouse: left-drag orbits, wheel zooms. Keys: 1 front, 2 right, 3 top, 4 persp,
 //! W wireframe, G grid, S selection, F cycle texture filter (texture / nearest /
@@ -10,6 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use polly_core::document::Document;
 use polly_core::scene::Filter;
+use polly_mcp::services::ViewerCommand;
 use polly_render::{Overlays, RenderOptions, Renderer, View, wgpu};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -51,6 +54,7 @@ struct App {
     doc: Arc<Mutex<Document>>,
     instance: wgpu::Instance,
     gfx: Option<Gfx>,
+    start_open: bool,
     cam: Cam,
     zoom: f32,
     overlays: Overlays,
@@ -110,10 +114,13 @@ impl App {
             filter: self.filter,
             ..RenderOptions::default()
         };
-        let (scene, version) = {
-            let d = self.doc.lock().unwrap_or_else(|e| e.into_inner());
-            (d.scene.clone(), d.version)
+        // Never block on the document: a tool call may hold it while waiting for us.
+        let Ok(d) = self.doc.try_lock() else {
+            self.redraw();
+            return;
         };
+        let (scene, version) = (d.scene.clone(), d.version);
+        drop(d);
         self.seen_version = Some(version);
         let Some(g) = self.gfx.as_mut() else { return };
         let frame = match g.surface.get_current_texture() {
@@ -165,19 +172,34 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<ViewerCommand> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.gfx.is_none() {
+        if self.start_open && self.gfx.is_none() {
+            self.start_open = false;
             if let Err(e) = self.init(el) {
                 tracing::error!("viewer unavailable: {e:#}");
-                el.exit();
             }
         }
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn user_event(&mut self, el: &ActiveEventLoop, cmd: ViewerCommand) {
+        match cmd {
+            ViewerCommand::Show(reply) => {
+                let r = if self.gfx.is_some() { Ok(()) } else { self.init(el).map_err(|e| format!("{e:#}")) };
+                self.seen_version = None;
+                self.redraw();
+                let _ = reply.send(r);
+            }
+            ViewerCommand::Hide(reply) => {
+                self.gfx = None;
+                let _ = reply.send(Ok(()));
+            }
+        }
+    }
+
+    fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => self.gfx = None,
             WindowEvent::Resized(size) => {
                 if let Some(g) = self.gfx.as_mut() {
                     g.config.width = size.width.max(1);
@@ -228,7 +250,7 @@ impl ApplicationHandler for App {
                         self.cam = Cam::Fixed("persp");
                         self.zoom = 1.0;
                     }
-                    Key::Named(NamedKey::Escape) => el.exit(),
+                    Key::Named(NamedKey::Escape) => self.gfx = None,
                     _ => return,
                 }
                 self.redraw();
@@ -238,23 +260,34 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        let version = self.doc.lock().map(|d| d.version).unwrap_or_default();
-        if self.seen_version != Some(version) {
-            self.redraw();
+        if self.gfx.is_none() {
+            el.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+        if let Ok(d) = self.doc.try_lock() {
+            if self.seen_version != Some(d.version) {
+                self.redraw();
+            }
         }
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100)));
     }
 }
 
-/// Run the viewer on the current (main) thread until the window is closed.
-pub fn run(doc: Arc<Mutex<Document>>) -> Result<()> {
-    let el = EventLoop::new().context("cannot open a window (no display?)")?;
+/// Create the event loop (needs a display). Must be called on the main thread.
+pub fn event_loop() -> Result<EventLoop<ViewerCommand>> {
+    EventLoop::with_user_event().build().context("no display for the live viewer")
+}
+
+/// Run the viewer event loop on the main thread. Opens the window right away
+/// only if `start_open`; otherwise it waits for `ViewerCommand::Show`.
+pub fn run(el: EventLoop<ViewerCommand>, doc: Arc<Mutex<Document>>, start_open: bool) -> Result<()> {
     let display = Box::new(Display(el.owned_display_handle()));
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(display));
     let mut app = App {
         doc,
         instance,
         gfx: None,
+        start_open,
         cam: Cam::Fixed("persp"),
         zoom: 1.0,
         overlays: Overlays::default(),

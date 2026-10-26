@@ -35,6 +35,9 @@ Workflow that works well
 4. UV: mark seams (or auto_seams), unwrap with a small texture size (e.g. 64x64) and pixel snapping; inspect with render_uv_layout.
 5. Paint: create_texture (optionally palette-locked), assign it through a material, fill_faces / draw / paint_stroke, check render.
 6. save_project, export_glb.
+
+The user may ask to watch live: show_viewer opens a window on their screen, hide_viewer closes it. Don't open it unasked.
+Subagents share this one scene: when several work in parallel, give each its own object and pass explicit `object` and element ids instead of relying on the selection.
 "#;
 
 #[derive(Clone)]

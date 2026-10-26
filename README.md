@@ -12,21 +12,24 @@ vertex colours, and flat or smooth shading.
 
 ```sh
 cargo build --release
-./target/release/polly            # MCP server on stdio
-./target/release/polly --viewer   # plus a live window that mirrors the scene
+./target/release/polly              # MCP server on stdio
+./target/release/polly --viewer     # also open the live window at startup
+./target/release/polly --no-viewer  # never open a window (no display connection)
 ./target/release/polly --project scene.polly
 ```
 
-The viewer is read-only and mirrors every edit live. Controls: left-drag to
+The live viewer is a read-only window that mirrors every edit. It is not shown
+by default: ask the agent to open it (`show_viewer`) when you want to watch,
+and to close it (`hide_viewer`) when you don't. Closing the window yourself has
+the same effect as `hide_viewer`. Controls: left-drag to
 orbit, mouse wheel to zoom, `1`–`4` for the front/right/top/persp views, `W`
 toggles the wireframe, `G` the grid, `S` the selection highlight, `F` cycles the
 texture filter (per-texture / nearest / linear), and `R` resets the camera.
-Closing the window leaves the server running.
 
 Register it with Claude Code:
 
 ```sh
-claude mcp add polly -- /path/to/polly3d/target/release/polly --viewer
+claude mcp add polly -- /path/to/polly3d/target/release/polly
 ```
 
 Logs go to stderr (`RUST_LOG=polly=debug`), because stdout carries the MCP
@@ -44,6 +47,11 @@ renderer.
 | `polly-export` | GLB export (textures embedded, sampler filter preserved), `.polly` project files |
 | `polly-mcp` | MCP tool layer (rmcp) |
 | `polly` | binary: stdio server + optional viewer |
+
+Subagents share the session's single `polly` process, so they all see one
+scene. Each tool call is atomic, but the active object, the selection, the undo
+history and the last render camera are shared too. Parallel subagents should
+each work on their own object and pass explicit `object` and element ids.
 
 ## Conventions the agent sees
 

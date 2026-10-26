@@ -1,6 +1,7 @@
 //! Process-wide services shared by tool handlers (renderer, settings).
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, mpsc};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use polly_render::{Renderer, Tile};
@@ -20,17 +21,43 @@ pub struct LastView {
     pub tiles: Vec<Tile>,
 }
 
+/// Requests to the live viewer window. Each carries a channel for the outcome.
+#[derive(Debug)]
+pub enum ViewerCommand {
+    Show(mpsc::Sender<Result<(), String>>),
+    Hide(mpsc::Sender<Result<(), String>>),
+}
+
+/// Sends a command to the viewer's event loop (provided by the host binary).
+pub type ViewerControl = Box<dyn Fn(ViewerCommand) -> Result<()> + Send + Sync>;
+
 #[derive(Default)]
 pub struct Services {
     pub settings: Mutex<Settings>,
     renderer: Mutex<Option<Renderer>>,
     pub last_view: Mutex<Option<LastView>>,
+    viewer: Mutex<Option<ViewerControl>>,
 }
 
 impl Services {
     /// Use a renderer provided by the host (e.g. sharing the viewer's GPU device).
     pub fn with_renderer(r: Renderer) -> Self {
         Services { renderer: Mutex::new(Some(r)), ..Default::default() }
+    }
+
+    pub fn set_viewer(&self, control: ViewerControl) {
+        *self.viewer.lock().unwrap() = Some(control);
+    }
+
+    /// Open (`true`) or close the live viewer window and wait for the outcome.
+    pub fn viewer(&self, show: bool) -> Result<()> {
+        let g = self.viewer.lock().unwrap();
+        let control = g.as_ref().context("the live viewer is unavailable (no display, or started with --no-viewer)")?;
+        let (tx, rx) = mpsc::channel();
+        control(if show { ViewerCommand::Show(tx) } else { ViewerCommand::Hide(tx) })?;
+        rx.recv_timeout(Duration::from_secs(10))
+            .context("the viewer did not respond")?
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     /// The renderer, created on first use.
