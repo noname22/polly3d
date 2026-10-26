@@ -1,22 +1,20 @@
-//! Binary glTF 2.0 export. One node per object, one primitive per material,
-//! textures embedded as PNG with nearest/linear samplers matching the
-//! texture's filter setting.
+//! Binary glTF 2.0 export. Textures are embedded as PNG with nearest/linear
+//! samplers matching each texture's filter setting. The layout for characters
+//! with swappable gear is described in `docs/gltf-extras.md`:
 //!
-//! Rigging and animation:
-//! - An object with a skeleton and skin weights gets one joint node per bone,
-//!   parented under the object's node (root bones directly, other bones under
-//!   their parent bone), and a skin whose inverse bind matrices are the
-//!   inverted bone rest frames in object space. Vertices without weights are
-//!   bound to an extra, never-animated `<object>_root` joint.
-//! - The skeleton is exported in its rest pose: the object's static `pose` is
-//!   NOT baked into the joints (clips are exported as animations instead).
-//! - Morph targets become per-primitive POSITION targets; the mesh's default
-//!   `weights` are the object's static morph weights and
-//!   `extras.targetNames` lists the morph names.
-//! - Every clip becomes a glTF animation. Bone channels are converted from
-//!   pose-relative values to full joint-node local TRS; morph weight channels
-//!   of one object are merged into a single `weights` sampler. Loop settings
-//!   go in `extras.polly`.
+//! - Every object with bones gets joint nodes under its node (one per bone, in
+//!   rest pose). Each armature has one skin, shared by every mesh skinned to it;
+//!   those meshes are written in the armature's space and placed under the
+//!   armature node. Vertices without usable weights use an `<armature>_root` joint.
+//! - Bone-attached objects are children of their joint node.
+//! - Parts hidden by some variant are split into their own child nodes
+//!   (`<object>.<part>`), so they can be hidden independently.
+//! - Non-default variants and parts hidden by default variants carry
+//!   `KHR_node_visibility` (used, not required); variants, parts and the slot
+//!   table are described in `extras.polly`.
+//! - The static pose is not baked: joints are in rest pose, clips become
+//!   animations (bone channels as full joint-node TRS, morph weights merged per
+//!   node, loop settings in `extras.polly`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -147,16 +145,23 @@ impl Prim {
     }
 }
 
-/// Per-object skin data gathered while building nodes.
+/// Joint nodes of one exported skeleton (an armature).
 struct SkinInfo {
     /// Joint node of each bone.
     joint_node: HashMap<BoneId, usize>,
-    /// Rest local transform (relative to the parent joint / object node) of each bone.
+    /// Rest local transform (relative to the parent joint / armature node) of each bone.
     local: HashMap<BoneId, (Vec3, Quat)>,
+    /// Bones in joint order (parent first).
+    bones: Vec<BoneId>,
+    /// Extra identity joint for vertices without usable weights.
+    root_joint: Option<usize>,
+    /// The glTF skin, once a skinned mesh needs it.
+    skin: Option<usize>,
 }
 
 pub struct ExportOptions {
     /// Objects to export (with their descendants); `None` = all visible.
+    /// Armatures and bone parents of exported objects are always included.
     pub objects: Option<Vec<ObjectId>>,
 }
 
@@ -179,28 +184,55 @@ fn vertex_skin(list: Option<&Vec<(BoneId, f32)>>, joint_idx: &HashMap<BoneId, u1
     Some((j, w))
 }
 
+fn trs(m: Mat4) -> Value {
+    let (s, r, t) = m.to_scale_rotation_translation();
+    json!({"translation": t.to_array(), "rotation": r.normalize().to_array(), "scale": s.to_array()})
+}
+
+fn add_child(nodes: &mut [Value], parent: usize, child: usize) {
+    let children = nodes[parent].as_object_mut().unwrap().entry("children").or_insert(json!([]));
+    children.as_array_mut().unwrap().push(json!(child));
+}
+
+/// Parts hidden by some variant's hide rule, per object: exported as their own
+/// nodes so they can be hidden independently.
+fn hideable_parts(scene: &Scene) -> BTreeMap<ObjectId, BTreeSet<String>> {
+    let mut out: BTreeMap<ObjectId, BTreeSet<String>> = BTreeMap::new();
+    for slot in scene.slots.values() {
+        for v in &slot.variants {
+            for h in &v.hides {
+                out.entry(h.object).or_default().insert(h.part.clone());
+            }
+        }
+    }
+    out
+}
+
 pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
     let mut b = Builder::default();
-    let selected: BTreeSet<ObjectId> = match &opts.objects {
-        Some(list) => {
-            let mut s: BTreeSet<ObjectId> = list.iter().copied().collect();
-            // include descendants
-            loop {
-                let before = s.len();
-                for (id, o) in &scene.objects {
-                    if o.parent.is_some_and(|p| s.contains(&p)) {
-                        s.insert(*id);
-                    }
-                }
-                if s.len() == before {
-                    break;
-                }
-            }
-            s
-        }
+    let mut selected: BTreeSet<ObjectId> = match &opts.objects {
+        Some(list) => list.iter().copied().collect(),
         None => scene.objects.iter().filter(|(_, o)| o.visible).map(|(id, _)| *id).collect(),
     };
-
+    // Descendants, plus what exported objects need: their armature and bone parents.
+    loop {
+        let before = selected.len();
+        let need: Vec<ObjectId> = selected
+            .iter()
+            .flat_map(|id| {
+                let o = &scene.objects[id];
+                let arm = o.skin.map(|s| s.armature);
+                let bone_parent = o.parent_bone.and(o.parent);
+                arm.into_iter().chain(bone_parent)
+            })
+            .chain(scene.objects.iter().filter(|(_, o)| o.parent.is_some_and(|p| selected.contains(&p))).map(|(id, _)| *id))
+            .filter(|id| scene.objects.contains_key(id))
+            .collect();
+        selected.extend(need);
+        if selected.len() == before {
+            break;
+        }
+    }
     // Textures / images / samplers.
     let mut images = Vec::new();
     let mut textures = Vec::new();
@@ -252,166 +284,235 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
     let mut skins = Vec::new();
     let mut node_of: BTreeMap<ObjectId, usize> = BTreeMap::new();
     let mut skin_info: HashMap<ObjectId, SkinInfo> = HashMap::new();
-    // Objects whose exported mesh has morph targets.
-    let mut has_morphs: BTreeSet<ObjectId> = BTreeSet::new();
+    // Nodes animated by an object's morph weights (its own node and its part nodes).
+    let mut morph_nodes: BTreeMap<ObjectId, Vec<usize>> = BTreeMap::new();
+    let mut extensions_used: BTreeSet<&str> = BTreeSet::new();
+    let hideable = hideable_parts(scene);
+
+    // 1. A node per object (filled in below) and joint nodes per skeleton.
+    for id in &selected {
+        node_of.insert(*id, nodes.len());
+        nodes.push(json!({"name": scene.objects[id].name}));
+    }
+    for id in &selected {
+        let Some(sk) = scene.objects[id].skeleton.as_ref().filter(|sk| !sk.bones.is_empty()) else { continue };
+        let bones = sk.ordered();
+        let rest: HashMap<BoneId, Mat4> = bones.iter().map(|b| (*b, sk.bones[b].rest_matrix())).collect();
+        let mut info = SkinInfo { joint_node: HashMap::new(), local: HashMap::new(), bones: bones.clone(), root_joint: None, skin: None };
+        for bid in &bones {
+            let bone = &sk.bones[bid];
+            let parent = bone.parent.filter(|p| rest.contains_key(p));
+            let parent_rest = parent.map_or(Mat4::IDENTITY, |p| rest[&p]);
+            let (_, r, tr) = (parent_rest.inverse() * rest[bid]).to_scale_rotation_translation();
+            let r = r.normalize();
+            let n = nodes.len();
+            nodes.push(json!({"name": bone.name, "translation": tr.to_array(), "rotation": r.to_array()}));
+            let pn = parent.map_or(node_of[id], |p| info.joint_node[&p]);
+            add_child(&mut nodes, pn, n);
+            info.joint_node.insert(*bid, n);
+            info.local.insert(*bid, (tr, r));
+        }
+        skin_info.insert(*id, info);
+    }
+
+    // 2. Place object nodes. Skinned meshes live in their armature's space under
+    // the armature node; bone-attached objects under their joint; the rest keep
+    // Polly's world placement relative to their parent's node.
+    // Which exported skeleton skins each object (it must have weights).
+    let skinned: BTreeMap<ObjectId, ObjectId> = selected
+        .iter()
+        .filter_map(|id| {
+            let src = scene.skeleton_source(*id)?;
+            (skin_info.contains_key(&src) && !scene.objects[id].mesh.weights.is_empty()).then_some((*id, src))
+        })
+        .collect();
+    let skinned_to = |id: &ObjectId| skinned.get(id).copied();
+    let export_world = |id: &ObjectId| -> Mat4 {
+        match skinned_to(id) {
+            Some(arm) if arm != *id => scene.world_matrix(arm),
+            _ => scene.world_matrix(*id),
+        }
+    };
+    let mut roots = Vec::new();
+    for id in &selected {
+        let o = &scene.objects[id];
+        let n = node_of[id];
+        let joint = o.parent_bone.zip(o.parent).and_then(|(b, p)| skin_info.get(&p)?.joint_node.get(&b).copied());
+        let (parent_node, local) = match (skinned_to(id), joint) {
+            (Some(arm), _) if arm != *id => (Some(node_of[&arm]), Mat4::IDENTITY),
+            (_, Some(j)) => (Some(j), o.transform.matrix()),
+            _ => match o.parent.filter(|p| selected.contains(p)) {
+                Some(p) => (Some(node_of[&p]), export_world(&p).inverse() * scene.world_matrix(*id)),
+                None => (None, scene.world_matrix(*id)),
+            },
+        };
+        for (k, v) in trs(local).as_object().unwrap() {
+            nodes[n][k] = v.clone();
+        }
+        match parent_node {
+            Some(p) => add_child(&mut nodes, p, n),
+            None => roots.push(n),
+        }
+    }
+
+    // Joints for vertices without usable weights, per skeleton.
+    for id in &selected {
+        let Some(arm) = skinned_to(id) else { continue };
+        let info = &skin_info[&arm];
+        let joint_idx: HashMap<BoneId, u16> = info.bones.iter().enumerate().map(|(i, b)| (*b, i as u16)).collect();
+        let mesh = &scene.objects[id].mesh;
+        let unweighted = mesh.faces.values().flat_map(|f| f.verts.iter()).any(|v| vertex_skin(mesh.weights.get(v), &joint_idx).is_none());
+        if unweighted && info.root_joint.is_none() {
+            let n = nodes.len();
+            nodes.push(json!({"name": format!("{}_root", scene.objects[&arm].name)}));
+            add_child(&mut nodes, node_of[&arm], n);
+            skin_info.get_mut(&arm).unwrap().root_joint = Some(n);
+        }
+    }
+
+    // 3. Meshes: one per object, plus one per hideable part on its own child node.
     for id in &selected {
         let o = &scene.objects[id];
         let mesh = &o.mesh;
+        let arm = skinned_to(id);
+        let to_skel = if arm.is_some() { scene.to_skeleton_space(*id) } else { Mat4::IDENTITY };
+        let normal_m = to_skel.inverse().transpose();
         let normals = mesh.corner_normals();
-        let used_verts: BTreeSet<VertId> = mesh.faces.values().flat_map(|f| f.verts.iter().copied()).collect();
-
-        // Skin: joints in parent-first order, plus a root joint for unweighted vertices.
-        let skeleton = o.skeleton.as_ref().filter(|sk| !sk.bones.is_empty() && !mesh.weights.is_empty());
-        let mut bones: Vec<BoneId> = Vec::new();
         let mut vert_skin: HashMap<VertId, ([u16; 4], [f32; 4])> = HashMap::new();
-        let mut needs_root = false;
-        if let Some(sk) = skeleton {
-            bones = sk.ordered();
-            let joint_idx: HashMap<BoneId, u16> = bones.iter().enumerate().map(|(i, b)| (*b, i as u16)).collect();
-            let root = bones.len() as u16;
-            for v in &used_verts {
-                let s = vertex_skin(mesh.weights.get(v), &joint_idx).unwrap_or_else(|| {
-                    needs_root = true;
-                    ([root, 0, 0, 0], [1.0, 0.0, 0.0, 0.0])
-                });
+        if let Some(arm) = arm {
+            let info = &skin_info[&arm];
+            let joint_idx: HashMap<BoneId, u16> = info.bones.iter().enumerate().map(|(i, b)| (*b, i as u16)).collect();
+            let root = info.bones.len() as u16;
+            for v in mesh.faces.values().flat_map(|f| f.verts.iter()) {
+                let s = vertex_skin(mesh.weights.get(v), &joint_idx).unwrap_or(([root, 0, 0, 0], [1.0, 0.0, 0.0, 0.0]));
                 vert_skin.insert(*v, s);
             }
+            if info.skin.is_none() {
+                let mut joints: Vec<usize> = info.bones.iter().map(|bn| info.joint_node[bn]).collect();
+                let sk = scene.objects[&arm].skeleton.as_ref().unwrap();
+                let mut ibm: Vec<f32> = info.bones.iter().flat_map(|bn| sk.bones[bn].rest_matrix().inverse().to_cols_array()).collect();
+                if let Some(r) = info.root_joint {
+                    joints.push(r);
+                    ibm.extend(Mat4::IDENTITY.to_cols_array());
+                }
+                let acc = b.float_accessor(&ibm, 16, false, None);
+                skins.push(json!({"name": scene.objects[&arm].name, "joints": joints, "inverseBindMatrices": acc, "skeleton": node_of[&arm]}));
+                skin_info.get_mut(&arm).unwrap().skin = Some(skins.len() - 1);
+            }
         }
-        let skinned = skeleton.is_some();
+        let skin_index = arm.and_then(|a| skin_info[&a].skin);
+        let skinned = arm.is_some();
         let morphed = !mesh.morphs.is_empty();
-
-        let mut prims: BTreeMap<u32, Prim> = BTreeMap::new();
+        let parts = hideable.get(id).cloned().unwrap_or_default();
+        // Faces grouped by hideable part (None = everything else), then by material.
+        let mut groups: BTreeMap<Option<String>, BTreeMap<u32, Prim>> = BTreeMap::new();
         for (&fid, f) in &mesh.faces {
-            let pts = mesh.face_positions(f);
-            let prim = prims.entry(f.material).or_default();
+            let pts: Vec<Vec3> = mesh.face_positions(f).iter().map(|p| to_skel.transform_point3(*p)).collect();
+            let group = f.part.clone().filter(|p| parts.contains(p));
+            let prim = groups.entry(group).or_default().entry(f.material).or_default();
             let vidx: Vec<u32> = (0..f.len())
                 .map(|i| {
                     let c = &f.corners[i];
                     let v = f.verts[i];
-                    prim.vertex(
-                        v,
-                        skinned || morphed,
-                        pts[i].to_array(),
-                        normals[&(fid, i)].to_array(),
-                        c.uv.to_array(),
-                        c.color.to_array(),
-                        vert_skin.get(&v),
-                    )
+                    let n = normal_m.transform_vector3(normals[&(fid, i)]).normalize_or_zero();
+                    prim.vertex(v, skinned || morphed, pts[i].to_array(), n.to_array(), c.uv.to_array(), c.color.to_array(), vert_skin.get(&v))
                 })
                 .collect();
             for [a, bb, c] in polly_core::geom::triangulate_polygon(&pts) {
                 prim.idx.extend([vidx[a], vidx[bb], vidx[c]]);
             }
         }
-        let mut pj = Vec::new();
-        for (mid, p) in prims {
-            if p.idx.is_empty() {
+        for (group, prims) in groups {
+            let mut pj = Vec::new();
+            for (mid, p) in prims {
+                if p.idx.is_empty() {
+                    continue;
+                }
+                let mut attrs = json!({
+                    "POSITION": b.floats(&p.pos, 3, true),
+                    "NORMAL": b.floats(&p.nrm, 3, false),
+                    "TEXCOORD_0": b.floats(&p.uv, 2, false),
+                });
+                if p.col.iter().any(|c| (*c - 1.0).abs() > 1e-6) {
+                    attrs["COLOR_0"] = json!(b.floats(&p.col, 4, false));
+                }
+                if skinned {
+                    attrs["JOINTS_0"] = json!(b.joints(&p.joints));
+                    attrs["WEIGHTS_0"] = json!(b.floats(&p.weights, 4, false));
+                }
+                let mut prim = json!({"attributes": attrs, "indices": b.indices(&p.idx), "material": mat_index[&mid], "mode": 4});
+                if morphed {
+                    let targets: Vec<Value> = mesh
+                        .morphs
+                        .iter()
+                        .map(|m| {
+                            let d: Vec<f32> = p
+                                .vids
+                                .iter()
+                                .flat_map(|v| to_skel.transform_vector3(m.offsets.get(v).copied().unwrap_or(Vec3::ZERO)).to_array())
+                                .collect();
+                            json!({"POSITION": b.floats(&d, 3, true)})
+                        })
+                        .collect();
+                    prim["targets"] = json!(targets);
+                }
+                pj.push(prim);
+            }
+            if pj.is_empty() {
                 continue;
             }
-            let mut attrs = json!({
-                "POSITION": b.floats(&p.pos, 3, true),
-                "NORMAL": b.floats(&p.nrm, 3, false),
-                "TEXCOORD_0": b.floats(&p.uv, 2, false),
-            });
-            if p.col.iter().any(|c| (*c - 1.0).abs() > 1e-6) {
-                attrs["COLOR_0"] = json!(b.floats(&p.col, 4, false));
-            }
-            if skinned {
-                attrs["JOINTS_0"] = json!(b.joints(&p.joints));
-                attrs["WEIGHTS_0"] = json!(b.floats(&p.weights, 4, false));
-            }
-            let mut prim = json!({"attributes": attrs, "indices": b.indices(&p.idx), "material": mat_index[&mid], "mode": 4});
-            if morphed {
-                let targets: Vec<Value> = mesh
-                    .morphs
-                    .iter()
-                    .map(|m| {
-                        let d: Vec<f32> =
-                            p.vids.iter().flat_map(|v| m.offsets.get(v).copied().unwrap_or(Vec3::ZERO).to_array()).collect();
-                        json!({"POSITION": b.floats(&d, 3, true)})
-                    })
-                    .collect();
-                prim["targets"] = json!(targets);
-            }
-            pj.push(prim);
-        }
-        // Objects attached to a bone: bake the bone's rest frame so they sit in
-        // the right place (they don't follow bone animation in the file yet).
-        let (sc, rot, tr) = (scene.bone_frame(*id) * o.transform.matrix()).to_scale_rotation_translation();
-        let mut node = json!({
-            "name": o.name,
-            "translation": tr.to_array(),
-            "rotation": rot.to_array(),
-            "scale": sc.to_array(),
-        });
-        if !pj.is_empty() {
             let mut mj = json!({"name": o.name, "primitives": pj});
             if morphed {
                 let w: Vec<f32> = mesh.morphs.iter().map(|m| o.morph_weights.get(&m.name).copied().unwrap_or(0.0)).collect();
                 let names: Vec<&str> = mesh.morphs.iter().map(|m| m.name.as_str()).collect();
                 mj["weights"] = json!(w);
                 mj["extras"] = json!({"targetNames": names});
-                has_morphs.insert(*id);
             }
             meshes.push(mj);
-            node["mesh"] = json!(meshes.len() - 1);
-        }
-        let obj_node = nodes.len();
-        nodes.push(node);
-        node_of.insert(*id, obj_node);
-
-        if let Some(sk) = skeleton {
-            let rest: HashMap<BoneId, Mat4> = bones.iter().map(|b| (*b, sk.bones[b].rest_matrix())).collect();
-            let mut info = SkinInfo { joint_node: HashMap::new(), local: HashMap::new() };
-            let mut joints = Vec::new();
-            let mut ibm: Vec<f32> = Vec::new();
-            let mut obj_children = Vec::new();
-            for bid in &bones {
-                let bone = &sk.bones[bid];
-                let parent = bone.parent.filter(|p| rest.contains_key(p));
-                let parent_rest = parent.map_or(Mat4::IDENTITY, |p| rest[&p]);
-                let (_, r, tr) = (parent_rest.inverse() * rest[bid]).to_scale_rotation_translation();
-                let r = r.normalize();
-                let n = nodes.len();
-                nodes.push(json!({"name": bone.name, "translation": tr.to_array(), "rotation": r.to_array()}));
-                match parent {
-                    Some(p) => {
-                        let pn = info.joint_node[&p];
-                        let children = nodes[pn].as_object_mut().unwrap().entry("children").or_insert(json!([]));
-                        children.as_array_mut().unwrap().push(json!(n));
-                    }
-                    None => obj_children.push(n),
+            let node = match &group {
+                None => node_of[id],
+                Some(part) => {
+                    let n = nodes.len();
+                    nodes.push(json!({
+                        "name": format!("{}.{part}", o.name),
+                        "extras": {"polly": {"object": o.name, "part": part}},
+                    }));
+                    add_child(&mut nodes, node_of[id], n);
+                    n
                 }
-                info.joint_node.insert(*bid, n);
-                info.local.insert(*bid, (tr, r));
-                joints.push(n);
-                ibm.extend(rest[bid].inverse().to_cols_array());
+            };
+            nodes[node]["mesh"] = json!(meshes.len() - 1);
+            if let Some(si) = skin_index {
+                nodes[node]["skin"] = json!(si);
             }
-            if needs_root {
-                let n = nodes.len();
-                nodes.push(json!({"name": format!("{}_root", o.name)}));
-                obj_children.push(n);
-                joints.push(n);
-                ibm.extend(Mat4::IDENTITY.to_cols_array());
+            if morphed {
+                morph_nodes.entry(*id).or_default().push(node);
             }
-            nodes[obj_node]["children"] = json!(obj_children);
-            if nodes[obj_node].get("mesh").is_some() {
-                let acc = b.float_accessor(&ibm, 16, false, None);
-                skins.push(json!({"name": o.name, "joints": joints, "inverseBindMatrices": acc}));
-                nodes[obj_node]["skin"] = json!(skins.len() - 1);
+            if let Some(part) = &group {
+                // Hidden by default when a default variant hides it.
+                let hidden = scene.slots.values().any(|s| {
+                    s.variants.iter().any(|v| v.name == s.default && v.hides.iter().any(|h| h.object == *id && &h.part == part))
+                });
+                if hidden {
+                    nodes[node]["extensions"] = json!({"KHR_node_visibility": {"visible": false}});
+                    extensions_used.insert("KHR_node_visibility");
+                }
             }
-            skin_info.insert(*id, info);
         }
     }
-    let mut roots = Vec::new();
-    for id in &selected {
-        let n = node_of[id];
-        match scene.objects[id].parent.and_then(|p| node_of.get(&p)) {
-            Some(&p) => {
-                let children = nodes[p].as_object_mut().unwrap().entry("children").or_insert(json!([]));
-                children.as_array_mut().unwrap().push(json!(n));
+
+    // 4. Variants: tag variant nodes; hide the non-default ones.
+    for (slot, s) in &scene.slots {
+        for v in &s.variants {
+            for oid in &v.objects {
+                let Some(&n) = node_of.get(oid) else { continue };
+                let default = v.name == s.default;
+                nodes[n]["extras"] = json!({"polly": {"slot": slot, "variant": v.name, "default": default}});
+                if !default {
+                    nodes[n]["extensions"] = json!({"KHR_node_visibility": {"visible": false}});
+                    extensions_used.insert("KHR_node_visibility");
+                }
             }
-            None => roots.push(n),
         }
     }
 
@@ -466,7 +567,7 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
                     add(&mut b, &times, &v, 3, ch.interpolation, obj_node, "scale");
                 }
                 Target::MorphWeight { morph, .. } => {
-                    if has_morphs.contains(&object) && scene.objects[&object].mesh.morphs.iter().any(|m| &m.name == morph) {
+                    if morph_nodes.contains_key(&object) && scene.objects[&object].mesh.morphs.iter().any(|m| &m.name == morph) {
                         morph_channels.entry(object).or_default().push(ch);
                     }
                 }
@@ -491,7 +592,9 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
             }
             let interp =
                 if chans.iter().all(|c| c.interpolation == Interpolation::Step) { Interpolation::Step } else { Interpolation::Linear };
-            add(&mut b, &times, &values, 1, interp, node_of[&object], "weights");
+            for &n in &morph_nodes[&object] {
+                add(&mut b, &times, &values, 1, interp, n, "weights");
+            }
         }
         if channels_j.is_empty() {
             continue; // glTF requires at least one channel per animation
@@ -513,10 +616,14 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
     while b.bin.len() % 4 != 0 {
         b.bin.push(0);
     }
+    let mut scene_j = json!({"nodes": roots});
+    if !scene.slots.is_empty() {
+        scene_j["extras"] = json!({"polly": slots_extras(scene, &selected)});
+    }
     let mut doc = json!({
         "asset": {"version": "2.0", "generator": "polly3d"},
         "scene": 0,
-        "scenes": [{"nodes": roots}],
+        "scenes": [scene_j],
         "nodes": nodes,
         "meshes": meshes,
         "materials": materials,
@@ -536,7 +643,11 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
         doc["animations"] = json!(animations);
     }
     if uses_unlit {
-        doc["extensionsUsed"] = json!(["KHR_materials_unlit"]);
+        extensions_used.insert("KHR_materials_unlit");
+    }
+    if !extensions_used.is_empty() {
+        // Used, never required: importers that don't know them still load the file.
+        doc["extensionsUsed"] = json!(extensions_used);
     }
     let mut js = serde_json::to_vec(&doc)?;
     while js.len() % 4 != 0 {
@@ -554,4 +665,35 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
     out.extend(b"BIN\0");
     out.extend(b.bin);
     Ok(out)
+}
+
+/// Slot table for the scene's extras (schema version 1, see docs/gltf-extras.md).
+fn slots_extras(scene: &Scene, selected: &BTreeSet<ObjectId>) -> Value {
+    let name = |id: &ObjectId| scene.objects[id].name.clone();
+    let slots: serde_json::Map<String, Value> = scene
+        .slots
+        .iter()
+        .map(|(slot, s)| {
+            let variants: serde_json::Map<String, Value> = s
+                .variants
+                .iter()
+                .map(|v| (v.name.clone(), json!(v.objects.iter().filter(|o| selected.contains(o)).map(name).collect::<Vec<_>>())))
+                .collect();
+            let hides: serde_json::Map<String, Value> = s
+                .variants
+                .iter()
+                .filter(|v| !v.hides.is_empty())
+                .map(|v| {
+                    let parts: Vec<Value> = v.hides.iter().map(|h| json!([name(&h.object), h.part, format!("{}.{}", name(&h.object), h.part)])).collect();
+                    (v.name.clone(), json!(parts))
+                })
+                .collect();
+            let mut j = json!({"default": s.default, "variants": variants});
+            if !hides.is_empty() {
+                j["hides"] = json!(hides);
+            }
+            (slot.clone(), j)
+        })
+        .collect();
+    json!({"version": 1, "slots": slots})
 }

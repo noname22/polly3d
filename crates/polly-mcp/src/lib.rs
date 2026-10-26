@@ -57,7 +57,7 @@ Rigging & animation (optional)
 - Pose: pose_bone (Euler degrees around the bone's own axes), then key_pose into a clip (create_clip; frames at the clip's fps). Repeat at other frames. Loop regions via update_clip.
 - Morphs: begin_morph, move vertices with the normal tools, end_morph; set_morph_weight or key them (key_pose with morphs, or set_key).
 - Check motion with render_animation (a filmstrip) or render {"pose":[{"clip":"walk","frame":6}]}; several clips with weights blend.
-- export_glb writes skins, morph targets and animations.
+- export_glb writes skins (one per armature, shared by its meshes), bone-attached gear, morph targets and animations. Gear variants are all exported: defaults visible, alternatives hidden (KHR_node_visibility) and described in extras for runtime swapping.
 
 The user may ask to watch live: show_viewer opens a window on their screen, hide_viewer closes it. Don't open it unasked.
 Scenes: everything above happens in a scene ("main" unless a tool call passes `scene`). Each scene has its own objects, selection, undo history and render camera.

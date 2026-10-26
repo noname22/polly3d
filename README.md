@@ -96,8 +96,7 @@ A skeleton can live on one object, an armature, with other meshes bound to it
 all its gear together. Bone, pose and clip tools accept a bound mesh and act
 on its armature, while skin weights stay on each mesh. Rigid gear is attached
 to a bone (`attach_to_bone`) and follows it; fitted gear gets the body's
-weights with `transfer_weights`. Shared-armature skins
-are not exported to GLB yet; `export_glb` warns about such meshes.
+weights with `transfer_weights`.
 
 ## Gear slots and variants
 
@@ -108,7 +107,13 @@ exported model is loaded. A variant can hide named parts of other objects
 while active, such as a helmet hiding `hair_top`, to avoid poke-through.
 Renders accept a variant choice, `render_variants` shows all options of a
 slot, and the viewer has a dropdown per slot (a preview that doesn't change
-the scene). Exporting the variants for runtime swapping is not done yet.
+the scene).
+
+The GLB export is made for games that swap gear at runtime. The file contains
+one shared skin per armature, every variant as its own node (non-defaults
+hidden with `KHR_node_visibility`), hideable parts as separate nodes, and the
+slot table in `extras`. See [docs/gltf-extras.md](docs/gltf-extras.md) for the
+format and [docs/bevy.md](docs/bevy.md) for using it in Bevy.
 
 ## Conventions the agent sees
 

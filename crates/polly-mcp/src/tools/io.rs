@@ -74,21 +74,5 @@ fn export(ctx: &mut Ctx, a: Export) -> Result<Out> {
         path.set_extension("glb");
     }
     std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
-    let msg = format!("exported {} ({} bytes)", std::path::absolute(&path)?.display(), bytes.len());
-    // Shared-armature skins are not exported yet (planned): say so instead of failing silently.
-    let names = |f: &dyn Fn(&polly_core::scene::Object) -> bool| -> Vec<String> {
-        ctx.doc.scene.objects.values().filter(|o| f(o)).map(|o| o.name.clone()).collect()
-    };
-    let (bound, attached) = (names(&|o| o.skin.is_some()), names(&|o| o.parent_bone.is_some()));
-    let mut warnings = vec![];
-    if !bound.is_empty() {
-        warnings.push(format!("meshes bound to an armature export unskinned, in their rest pose: {}", bound.join(", ")));
-    }
-    if !attached.is_empty() {
-        warnings.push(format!("bone-attached gear is placed correctly but doesn't follow bone animation: {}", attached.join(", ")));
-    }
-    if warnings.is_empty() {
-        return Ok(ok(msg));
-    }
-    Ok(Out::json(json!({"result": msg, "not_yet_supported": warnings})))
+    Ok(ok(format!("exported {} ({} bytes)", std::path::absolute(&path)?.display(), bytes.len())))
 }

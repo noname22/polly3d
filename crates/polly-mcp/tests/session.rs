@@ -573,8 +573,7 @@ fn shared_armature() {
     // Export says what isn't supported yet; deleting the rig unbinds.
     let dir = std::env::temp_dir().join(format!("polly-armature-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let r = call(&s, "export_glb", json!({"path": dir.join("a.glb").to_str().unwrap()}));
-    assert!(r["not_yet_supported"][0].as_str().unwrap().contains("Body"), "{r}");
+    call(&s, "export_glb", json!({"path": dir.join("a.glb").to_str().unwrap()}));
     std::fs::remove_dir_all(dir).ok();
     call(&s, "delete_object", json!({"object": "Rig"}));
     let sc = call(&s, "describe_scene", json!({}));
@@ -646,8 +645,7 @@ fn fitting_gear() {
     let dir = std::env::temp_dir().join(format!("polly-gear-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("g.glb");
-    let r = call(&s, "export_glb", json!({"path": path.to_str().unwrap()}));
-    assert!(r["not_yet_supported"].to_string().contains("Sword"), "{r}");
+    call(&s, "export_glb", json!({"path": path.to_str().unwrap()}));
     let (doc, _, _) = gltf::import(&path).unwrap();
     let mut world = std::collections::HashMap::new();
     fn walk(n: gltf::Node, parent: polly_core::glam::Mat4, out: &mut std::collections::HashMap<String, polly_core::glam::Mat4>) {
@@ -721,4 +719,128 @@ fn slots_and_variants() {
     call(&s, "delete_object", json!({"object": "HairLong"}));
     let slots = call(&s, "list_slots", json!({}));
     assert_eq!(slots["slots"][0]["variants"][1]["objects"], json!([]), "{slots}");
+}
+
+/// Phase 4 of gear support: the runtime-swappable GLB.
+#[test]
+fn runtime_gear_export() {
+    use polly_core::glam::{Mat4, Vec3};
+    let s = server();
+    // Rig away from the origin so wrong spaces would show.
+    call(&s, "add_mesh", json!({"name": "Rig", "vertices": [], "faces": [], "position": [2.0, 0.5, -1.0]}));
+    call(&s, "set_transform", json!({"object": "Rig", "rotation": [0, 30, 0]}));
+    call(&s, "add_bone_chain", json!({"object": "Rig", "points": [[0, -1, 0], [0, 0.5, 0], [0, 1, 0]], "names": ["spine", "head"]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.6, 1.5, 0.4]}, "name": "Body", "position": [2.0, 0.25, -1.0]}));
+    call(&s, "bind_to_armature", json!({"object": "Body", "armature": "Rig"}));
+    call(&s, "auto_weights", json!({"object": "Body"}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "radius_bottom": 0.5, "radius_top": 0.35, "height": 0.6, "segments": 8, "caps": false}, "name": "Skirt", "position": [2.0, -0.2, -1.0]}));
+    call(&s, "transfer_weights", json!({"object": "Skirt", "from": "Body"}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.4, 0.2, 0.4]}, "name": "HairShort", "position": [2.0, 1.15, -1.0]}));
+    call(&s, "select", json!({"object": "HairShort", "query": {"by": "normal", "direction": [0, 1, 0]}}));
+    call(&s, "set_part", json!({"object": "HairShort", "name": "hair_top"}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.45, 0.7, 0.45]}, "name": "HairLong", "position": [2.0, 0.9, -1.0]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "radius_bottom": 0.3, "radius_top": 0.0, "height": 0.4}, "name": "Helmet", "position": [2.0, 1.35, -1.0]}));
+    call(&s, "attach_to_bone", json!({"object": "Helmet", "armature": "Rig", "bone": "head"}));
+    for m in ["HairShort", "HairLong"] {
+        call(&s, "attach_to_bone", json!({"object": m, "armature": "Rig", "bone": "head"}));
+    }
+    call(&s, "add_variant", json!({"slot": "hair", "variant": "short", "objects": ["HairShort"]}));
+    call(&s, "add_variant", json!({"slot": "hair", "variant": "long", "objects": ["HairLong"]}));
+    call(&s, "add_variant", json!({"slot": "head", "variant": "helmet", "objects": ["Helmet"], "hides": [{"object": "HairShort", "part": "hair_top"}]}));
+    call(&s, "add_variant", json!({"slot": "head", "variant": "none"}));
+    call(&s, "create_clip", json!({"name": "nod", "frames": 12}));
+    call(&s, "set_key", json!({"clip": "nod", "frame": 0, "object": "Rig", "bone": "head", "value": [0, 0, 0]}));
+    call(&s, "set_key", json!({"clip": "nod", "frame": 12, "object": "Rig", "bone": "head", "value": [30, 0, 0]}));
+
+    // Polly's world positions, for comparison.
+    let (world_of, bounds_of) = {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let sc = &g.doc.scene;
+        let ids: Vec<(String, u32)> = sc.objects.iter().map(|(i, o)| (o.name.clone(), *i)).collect();
+        let world: std::collections::HashMap<String, Mat4> = ids.iter().map(|(n, i)| (n.clone(), sc.world_matrix(*i))).collect();
+        let bounds: std::collections::HashMap<String, (Vec3, Vec3)> = ids
+            .iter()
+            .filter(|(_, i)| !sc.objects[i].mesh.verts.is_empty())
+            .map(|(n, i)| {
+                let m = sc.world_matrix(*i);
+                let pts: Vec<Vec3> = sc.objects[i].mesh.verts.values().map(|v| m.transform_point3(v.pos)).collect();
+                (n.clone(), (pts.iter().fold(Vec3::MAX, |a, b| a.min(*b)), pts.iter().fold(Vec3::MIN, |a, b| a.max(*b))))
+            })
+            .collect();
+        (world, bounds)
+    };
+
+    let dir = std::env::temp_dir().join(format!("polly-knight-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("knight.glb");
+    call(&s, "export_glb", json!({"path": path.to_str().unwrap()}));
+    let bytes = std::fs::read(&path).unwrap();
+    let (doc, buffers, _) = gltf::import(&path).unwrap();
+    let json: Value = {
+        let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        serde_json::from_slice(&bytes[20..20 + len]).unwrap()
+    };
+    std::fs::remove_dir_all(&dir).ok();
+
+    // Node world matrices (rest pose).
+    let mut world = std::collections::HashMap::new();
+    let mut parent_name = std::collections::HashMap::new();
+    fn walk(n: gltf::Node, parent: (Mat4, String), w: &mut std::collections::HashMap<String, Mat4>, p: &mut std::collections::HashMap<String, String>) {
+        let m = parent.0 * Mat4::from_cols_array_2d(&n.transform().matrix());
+        let name = n.name().unwrap_or("").to_string();
+        w.insert(name.clone(), m);
+        p.insert(name.clone(), parent.1.clone());
+        for c in n.children() {
+            walk(c, (m, name.clone()), w, p);
+        }
+    }
+    for n in doc.scenes().next().unwrap().nodes() {
+        walk(n, (Mat4::IDENTITY, String::new()), &mut world, &mut parent_name);
+    }
+
+    // 1. One skin, shared by Body and Skirt, which hang under the rig.
+    assert_eq!(doc.skins().count(), 1);
+    let skinned: Vec<String> = doc.nodes().filter(|n| n.skin().is_some()).map(|n| n.name().unwrap().to_string()).collect();
+    assert!(skinned.contains(&"Body".into()) && skinned.contains(&"Skirt".into()), "{skinned:?}");
+    assert_eq!(parent_name["Skirt"], "Rig");
+    // 2. Rest-pose positions match Polly: skinned vertices are in rig space.
+    for name in ["Body", "Skirt"] {
+        let node = doc.nodes().find(|n| n.name() == Some(name)).unwrap();
+        let mut lo = Vec3::MAX;
+        let mut hi = Vec3::MIN;
+        for p in node.mesh().unwrap().primitives() {
+            for v in p.reader(|b| Some(&buffers[b.index()])).read_positions().unwrap() {
+                let w = world_of["Rig"].transform_point3(Vec3::from(v));
+                lo = lo.min(w);
+                hi = hi.max(w);
+            }
+        }
+        let (plo, phi) = bounds_of[name];
+        assert!((lo - plo).length() < 1e-3 && (hi - phi).length() < 1e-3, "{name}: {lo},{hi} vs {plo},{phi}");
+    }
+    // 3. Bone-attached gear is a child of its joint, at Polly's place.
+    assert_eq!(parent_name["Helmet"], "head");
+    assert!(world["Helmet"].abs_diff_eq(world_of["Helmet"], 1e-4), "{} vs {}", world["Helmet"], world_of["Helmet"]);
+    // 4. Variants: non-defaults hidden and tagged.
+    let node_j = |name: &str| json["nodes"].as_array().unwrap().iter().find(|n| n["name"] == name).unwrap().clone();
+    assert_eq!(node_j("HairLong")["extensions"]["KHR_node_visibility"]["visible"], false);
+    assert_eq!(node_j("HairLong")["extras"]["polly"], json!({"slot": "hair", "variant": "long", "default": false}));
+    assert!(node_j("HairShort").get("extensions").is_none());
+    assert!(node_j("Helmet").get("extensions").is_none(), "helmet is the default head variant");
+    // 5. The hideable part is its own node, hidden by default because the default (helmet) hides it.
+    let part = node_j("HairShort.hair_top");
+    assert_eq!(part["extensions"]["KHR_node_visibility"]["visible"], false, "{part}");
+    assert_eq!(part["extras"]["polly"], json!({"object": "HairShort", "part": "hair_top"}));
+    assert_eq!(parent_name["HairShort.hair_top"], "HairShort");
+    // 6. Slot table on the scene; 7. extension used, never required.
+    let slots = &json["scenes"][0]["extras"]["polly"];
+    assert_eq!(slots["version"], 1);
+    assert_eq!(slots["slots"]["head"]["default"], "helmet");
+    assert_eq!(slots["slots"]["head"]["hides"]["helmet"][0], json!(["HairShort", "hair_top", "HairShort.hair_top"]));
+    assert!(json["extensionsUsed"].as_array().unwrap().contains(&json!("KHR_node_visibility")));
+    assert!(json.get("extensionsRequired").is_none());
+    // The nod animation targets the head joint.
+    let anim = doc.animations().next().unwrap();
+    assert!(anim.channels().any(|c| c.target().node().name() == Some("head")));
 }
