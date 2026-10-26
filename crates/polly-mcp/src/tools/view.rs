@@ -122,6 +122,7 @@ fn options(scene: &Scene, a: &RenderArgs, default_size: u32) -> Result<RenderOpt
         background: None,
         label_scale: a.label_scale,
         legend: a.legend.unwrap_or(true),
+        frame_bounds: None,
     })
 }
 

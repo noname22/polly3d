@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use egui::load::SizedTexture;
-use polly_core::scene::Filter;
+use polly_core::scene::{Filter, Scene};
+
+use crate::anim_panel::{self, AnimState};
 use polly_mcp::overview::{layout, tile_options};
 use polly_mcp::services::ViewerCommand;
 use polly_mcp::workspace::{MAIN, Snapshot, Workspace};
@@ -101,6 +103,8 @@ enum Mode {
 
 /// What the user is looking at; survives closing and reopening the window.
 struct ViewState {
+    /// Animation playback per scene name.
+    anim: HashMap<String, AnimState>,
     mode: Mode,
     cam: Cam,
     zoom: f32,
@@ -317,16 +321,76 @@ fn build_ui(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, workspace: &
             Mode::Single(name) => toolbar(ui, view, name, several),
         });
     });
+    // Single-scene mode: snapshot the scene once for the panel and the view.
+    let mut shown: Option<Scene> = None;
+    let mut rest_bounds = None;
+    if let Mode::Single(name) = &mode {
+        let Ok((snaps, _)) = workspace.snapshots(Some(std::slice::from_ref(name)), None, SCENE_WAIT) else {
+            // The scene was deleted.
+            view.mode = Mode::Overview;
+            return Ok(true);
+        };
+        if let Some(snap) = snaps.into_iter().next() {
+            let st = view.anim.entry(name.clone()).or_default();
+            let dt = ui.input(|i| i.stable_dt).min(0.1);
+            st.advance(&snap.scene, dt);
+            if ui.input(|i| i.key_pressed(egui::Key::Space)) && !snap.scene.clips.is_empty() {
+                st.toggle_play(&snap.scene);
+            }
+            if AnimState::has_content(&snap.scene) {
+                let edit = egui::Panel::bottom("animation")
+                    .show(ui, |ui| {
+                        ui.add_space(4.0);
+                        anim_panel::panel(ui, st, &snap.scene)
+                    })
+                    .inner;
+                if let Some(e) = edit {
+                    commit_loop(workspace, name, e);
+                }
+            }
+            if st.playing() {
+                ui.ctx().request_repaint();
+            }
+            // Frame the rest pose so the camera holds still during playback.
+            rest_bounds = snap.scene.bounds().map(|(lo, hi)| [lo.to_array(), hi.to_array()]);
+            shown = Some(st.display(&snap.scene));
+        }
+    }
     let mut complete = true;
     egui::CentralPanel::default().show(ui, |ui| -> Result<()> {
         match &mode {
             Mode::Overview => complete = overview(ui, view, gpu, workspace)?,
-            Mode::Single(name) => complete = single(ui, view, gpu, workspace, name)?,
+            Mode::Single(_) => complete = single(ui, view, gpu, shown.as_ref(), rest_bounds)?,
         }
         Ok(())
     })
     .inner?;
     Ok(complete)
+}
+
+/// Store a loop region dragged in the timeline as an undoable edit of the clip.
+fn commit_loop(workspace: &Workspace, scene: &str, e: anim_panel::LoopEdit) {
+    let Ok(slot) = workspace.get(scene) else { return };
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut guard = loop {
+        match slot.try_lock() {
+            Ok(g) => break g,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Err(_) => {
+                tracing::warn!("viewer: scene '{scene}' busy, loop region not saved");
+                return;
+            }
+        }
+    };
+    let r = guard.doc.edit("set loop region (viewer)", |s| {
+        let c = s.clips.get_mut(&e.clip).ok_or_else(|| polly_core::Error::Invalid("clip was deleted".into()))?;
+        c.loop_start = e.start;
+        c.loop_end = Some(e.end);
+        Ok(())
+    });
+    if let Err(err) = r {
+        tracing::warn!("viewer: {err}");
+    }
 }
 
 fn shortcuts(ui: &mut egui::Ui, view: &mut ViewState, mode: &Mode, several: bool) {
@@ -461,12 +525,7 @@ fn refresh_thumb(ctx: &egui::Context, gpu: &mut Gpu, s: &Snapshot, size: u32) ->
     Ok(())
 }
 
-fn single(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, workspace: &Workspace, name: &str) -> Result<bool> {
-    let Ok((snaps, _)) = workspace.snapshots(Some(&[name.to_string()]), None, SCENE_WAIT) else {
-        // The scene was deleted.
-        view.mode = Mode::Overview;
-        return Ok(true);
-    };
+fn single(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, shown: Option<&Scene>, frame_bounds: Option<[[f32; 3]; 2]>) -> Result<bool> {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
     if response.dragged() {
         let d = response.drag_delta();
@@ -481,7 +540,7 @@ fn single(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, workspace: &Wo
     }
     let ppp = ui.ctx().pixels_per_point();
     let size = [(rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32];
-    let Some(snap) = snaps.first() else {
+    let Some(scene) = shown else {
         // Busy: keep showing the previous frame.
         if let Some(vp) = &gpu.viewport {
             ui.painter().image(vp.id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
@@ -497,10 +556,10 @@ fn single(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, workspace: &Wo
         overlays: view.overlays.clone(),
         filter: view.filter,
         legend: false,
+        frame_bounds,
         ..RenderOptions::default()
     };
-    let shown = polly_core::anim::pose_scene(&snap.scene, &[]);
-    gpu.scene.render_to_view(&shown, &opts, &target, VIEWPORT_FORMAT, size)?;
+    gpu.scene.render_to_view(scene, &opts, &target, VIEWPORT_FORMAT, size)?;
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     ui.painter().image(id, rect, uv, egui::Color32::WHITE);
     ui.painter().text(
@@ -627,7 +686,7 @@ pub fn run(el: EventLoop<ViewerCommand>, workspace: Arc<Workspace>, start_open: 
         instance,
         gfx: None,
         start_open,
-        view: ViewState { mode: Mode::Overview, cam: Cam::Persp, zoom: 1.0, overlays: Overlays::default(), filter: None },
+        view: ViewState { anim: HashMap::new(), mode: Mode::Overview, cam: Cam::Persp, zoom: 1.0, overlays: Overlays::default(), filter: None },
         seen: None,
         error: None,
     };

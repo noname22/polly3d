@@ -70,12 +70,12 @@ pub(crate) fn grid_extent(bounds: Option<(Vec3, Vec3)>) -> (f32, f32) {
     (ext, step)
 }
 
-pub(crate) fn build(scene: &Scene, prep: &Prepared, ov: &Overlays, s: f32, frame_radius: f32) -> Vec<LineInst> {
+pub(crate) fn build(scene: &Scene, prep: &Prepared, ov: &Overlays, s: f32, frame_radius: f32, frame_bounds: Option<(Vec3, Vec3)>) -> Vec<LineInst> {
     let mut lb = LineBuilder { out: Vec::new(), s };
     let all: Vec<_> = prep.objects.iter().collect();
 
     if ov.grid {
-        let (ext, step) = grid_extent(world_bounds(&all));
+        let (ext, step) = grid_extent(frame_bounds.or_else(|| world_bounds(&all)));
         let n = (ext / step).round() as i32;
         let minor = [0.55, 0.57, 0.62, 0.35];
         for i in -n..=n {
@@ -87,7 +87,7 @@ pub(crate) fn build(scene: &Scene, prep: &Prepared, ov: &Overlays, s: f32, frame
         }
         lb.line(Vec3::new(-ext, 0.0, 0.0), Vec3::new(ext, 0.0, 0.0), [0.9, 0.2, 0.2, 0.9], 2.0, 0.0);
         lb.line(Vec3::new(0.0, 0.0, -ext), Vec3::new(0.0, 0.0, ext), [0.2, 0.4, 0.95, 0.9], 2.0, 0.0);
-        let yh = world_bounds(&all).map_or(step, |(_, hi)| hi.y.max(step) * 1.15);
+        let yh = frame_bounds.or_else(|| world_bounds(&all)).map_or(step, |(_, hi)| hi.y.max(step) * 1.15);
         lb.line(Vec3::ZERO, Vec3::new(0.0, yh, 0.0), [0.25, 0.85, 0.3, 0.6], 1.5, 0.0);
     }
 

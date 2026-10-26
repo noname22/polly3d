@@ -72,13 +72,16 @@ pub(crate) fn setup(scene: &Scene, o: &RenderOptions, size: [u32; 2]) -> Setup {
         Some(f) => prep.objects.iter().filter(|p| f.contains(&p.id)).collect(),
         None => all_refs.clone(),
     };
-    let frame = world_bounds(&focus_refs).or_else(|| world_bounds(&all_refs)).unwrap_or((Vec3::splat(-1.0), Vec3::splat(1.0)));
+    let frame = match o.frame_bounds {
+        Some([lo, hi]) => (Vec3::from(lo), Vec3::from(hi)),
+        None => world_bounds(&focus_refs).or_else(|| world_bounds(&all_refs)).unwrap_or((Vec3::splat(-1.0), Vec3::splat(1.0))),
+    };
     if prep.objects.is_empty() {
         notes.push("scene has no visible objects".into());
     }
     let mut depth = world_bounds(&all_refs).unwrap_or(frame);
     if o.overlays.grid {
-        let (ext, _) = lines::grid_extent(world_bounds(&all_refs));
+        let (ext, _) = lines::grid_extent(o.frame_bounds.map(|_| frame).or_else(|| world_bounds(&all_refs)));
         depth = (depth.0.min(Vec3::new(-ext, 0.0, -ext)), depth.1.max(Vec3::new(ext, 0.0, ext)));
     }
     let cam = camera::resolve(&o.view, frame, depth, o.zoom, size);
@@ -549,7 +552,8 @@ impl Renderer {
         }
 
         let scale = (size[0].min(size[1]) as f32 / 512.0).clamp(0.75, 2.0);
-        let line_insts = lines::build(scene, &prep, &o.overlays, scale, frame_radius);
+        let fb = o.frame_bounds.map(|[lo, hi]| (Vec3::from(lo), Vec3::from(hi)));
+        let line_insts = lines::build(scene, &prep, &o.overlays, scale, frame_radius, fb);
 
         // ---- uniforms ----
         let f = cam.forward();

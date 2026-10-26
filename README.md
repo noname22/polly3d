@@ -29,6 +29,19 @@ the mouse wheel zooms, and the shortcuts are `1`–`4` (front/right/top/persp),
 `W` (wireframe), `G` (grid), `S` (selection highlight), `F` (cycle texture
 filter) and `R` (reset view).
 
+When a scene has animation clips or morph targets, an animation panel appears
+below the view:
+- Play/Pause (Space) and Stop.
+- A timeline of the selected clip: click or drag to scrub. Drag the blue
+  triangles to move the loop region.
+- One row per clip, with a checkbox to play it and a blend weight slider.
+  Several checked clips blend. Click a clip's name to show it on the timeline.
+- A weight slider per morph target.
+
+Playback, clip weights and morph sliders are a preview and don't change the
+scene. Moving a loop handle edits the clip, so the agent sees it and it can be
+undone. The camera frames the rest pose, so it holds still while clips play.
+
 Register it with Claude Code:
 
 ```sh

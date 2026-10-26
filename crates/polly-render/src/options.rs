@@ -171,6 +171,11 @@ pub struct RenderOptions {
     /// Draw the corner legend (view name, axis hints, axis gizmo). Default true.
     #[serde(default = "t")]
     pub legend: bool,
+    /// Frame these world bounds instead of the scene's (e.g. the rest pose, so
+    /// the camera holds still while an animation plays). Not an agent option.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub frame_bounds: Option<[[f32; 3]; 2]>,
 }
 
 impl Default for RenderOptions {
@@ -187,6 +192,7 @@ impl Default for RenderOptions {
             background: None,
             label_scale: None,
             legend: true,
+            frame_bounds: None,
         }
     }
 }

@@ -10,6 +10,7 @@ use polly_mcp::services::Services;
 use polly_mcp::workspace::{SceneSlot, Workspace};
 use rmcp::ServiceExt;
 
+mod anim_panel;
 mod viewer;
 
 struct Args {
