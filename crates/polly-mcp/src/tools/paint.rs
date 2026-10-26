@@ -51,9 +51,14 @@ pub fn tools() -> Vec<ToolDef> {
     ]
 }
 
-/// The palette implied by tool args: the referenced texture's palette lock.
+/// The palette that palette-index colours ("p3") in tool args refer to: a
+/// palette named in the same call (e.g. `create_texture` with `palette`),
+/// otherwise the referenced texture's palette lock.
 pub fn args_palette(ctx: &Ctx, args: &Value) -> Option<Vec<Rgba>> {
     let s = &ctx.doc.scene;
+    if let Some(p) = args.get("palette").and_then(Value::as_str).and_then(|n| palette_named(s, n)) {
+        return Some(p);
+    }
     let tex = match args.get("texture").and_then(Value::as_str) {
         Some(t) => s.resolve_texture(t).ok(),
         None => {

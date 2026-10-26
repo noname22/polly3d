@@ -79,6 +79,19 @@ fn model_a_crate() {
 }
 
 #[test]
+fn palette_index_with_palette_in_same_call() {
+    let s = server();
+    // Regression: "p21" must resolve against the palette given in the same call.
+    call(&s, "create_texture", json!({"name": "T", "width": 4, "height": 4, "palette": "db32", "fill": "p21"}));
+    let db32 = polly_paint::palette::builtin("db32").unwrap();
+    let px = s.workspace.get("main").unwrap().lock().unwrap().doc.scene.textures.values().next().unwrap().get(0, 0);
+    assert_eq!(px, db32[21]);
+    // Without any palette it is still a clear error.
+    let e = call_err(&s, "create_texture", json!({"name": "U", "fill": "p21"}));
+    assert!(e.contains("p21"), "{e}");
+}
+
+#[test]
 fn unwrap_cube() {
     let s = server();
     call(&s, "add_primitive", json!({"shape": {"kind": "cube"}}));
