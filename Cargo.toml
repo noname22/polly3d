@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+polly-core = { path = "crates/polly-core" }
+polly-uv = { path = "crates/polly-uv" }
+polly-paint = { path = "crates/polly-paint" }
+polly-render = { path = "crates/polly-render" }
+polly-export = { path = "crates/polly-export" }
+polly-mcp = { path = "crates/polly-mcp" }
+
+anyhow = "1.0.104"
+thiserror = "2"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1.0.154"
+glam = { version = "0.34.1", features = ["serde", "bytemuck"] }
+base64 = "0.22"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+rmcp = { version = "3.7.0", features = ["server", "transport-io", "macros", "schemars"] }
+schemars = "1.2.3"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }
+wgpu = "30.0.1"
+winit = "0.30.13"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+pollster = "1.0.1"
+faer = "0.24.4"
+gltf-json = "1.4.1"
+gltf = "1.4.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

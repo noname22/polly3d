@@ -1,0 +1,6 @@
+[package]
+name = "polly-uv"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
