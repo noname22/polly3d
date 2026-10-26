@@ -41,6 +41,12 @@ pub fn tools() -> Vec<ToolDef> {
             false,
             shell,
         ),
+        def(
+            "set_positions",
+            "Set many vertices to exact positions in one undoable edit: `positions` maps ids to [x, y, z] ({\"v12\": [0.1, 1.5, 0.08], ...}), or `path` names a JSON file with that map or in export_mesh's format (vertex_ids + vertices). `mirror` moves each vertex's partner across x = 0 too.",
+            false,
+            set_positions,
+        ),
         def("set_position", "Set absolute coordinates of elements' vertices; omitted axes are unchanged (e.g. flatten to y=0).", false, set_position),
         def("snap", "Snap vertex positions to a grid step.", false, snap),
         def(
@@ -83,6 +89,9 @@ struct Move {
     offset: [f32; 3],
     #[serde(flatten)]
     soft: Soft,
+    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
+    #[serde(default)]
+    mirror: bool,
 }
 
 /// Soft selection: also move nearby vertices, fading out with distance.
@@ -116,7 +125,7 @@ fn soft_note(mut out: Out, selected: usize, affected: Option<usize>) -> Out {
 
 fn move_(ctx: &mut Ctx, a: Move) -> Result<Out> {
     let (mut sel, mut aff) = (0, None);
-    let out = edit_mesh(ctx, &a.object, Some(&a.elements), "move", |m, s| {
+    let out = edit_mesh_mirrored(ctx, &a.object, Some(&a.elements), "move", a.mirror, |m, s| {
         let vs = s.touched_verts(m);
         sel = vs.len();
         match a.soft.weights(m, &vs) {
@@ -144,6 +153,9 @@ struct Rotate {
     pivot: Option<Pivot>,
     #[serde(flatten)]
     soft: Soft,
+    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
+    #[serde(default)]
+    mirror: bool,
 }
 
 fn rotate(ctx: &mut Ctx, a: Rotate) -> Result<Out> {
@@ -154,7 +166,7 @@ fn rotate(ctx: &mut Ctx, a: Rotate) -> Result<Out> {
     };
     let piv = a.pivot.clone();
     let (mut sel, mut aff) = (0, None);
-    let out = edit_mesh(ctx, &a.object, Some(&a.elements), "rotate", |m, s| {
+    let out = edit_mesh_mirrored(ctx, &a.object, Some(&a.elements), "rotate", a.mirror, |m, s| {
         let vs = s.touched_verts(m);
         sel = vs.len();
         let p = pivot(m, &vs, &piv).map_err(|e| polly_core::Error::Invalid(e.to_string()))?;
@@ -178,12 +190,15 @@ struct Scale {
     pivot: Option<Pivot>,
     #[serde(flatten)]
     soft: Soft,
+    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
+    #[serde(default)]
+    mirror: bool,
 }
 
 fn scale(ctx: &mut Ctx, a: Scale) -> Result<Out> {
     let piv = a.pivot.clone();
     let (mut sel, mut aff) = (0, None);
-    let out = edit_mesh(ctx, &a.object, Some(&a.elements), "scale", |m, s| {
+    let out = edit_mesh_mirrored(ctx, &a.object, Some(&a.elements), "scale", a.mirror, |m, s| {
         let vs = s.touched_verts(m);
         sel = vs.len();
         let p = pivot(m, &vs, &piv).map_err(|e| polly_core::Error::Invalid(e.to_string()))?;
@@ -206,10 +221,13 @@ struct SetPosition {
     x: Option<f32>,
     y: Option<f32>,
     z: Option<f32>,
+    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
+    #[serde(default)]
+    mirror: bool,
 }
 
 fn set_position(ctx: &mut Ctx, a: SetPosition) -> Result<Out> {
-    edit_mesh(ctx, &a.object, Some(&a.elements), "set position", |m, s| {
+    edit_mesh_mirrored(ctx, &a.object, Some(&a.elements), "set position", a.mirror, |m, s| {
         transform::set_position(m, &s.touched_verts(m), [a.x, a.y, a.z])?;
         Ok(s.clone())
     })
@@ -700,11 +718,14 @@ struct Inflate {
     distance: f32,
     /// A plane vertices may not cross (object space).
     keep_plane: Option<PlaneArg>,
+    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
+    #[serde(default)]
+    mirror: bool,
 }
 
 fn inflate(ctx: &mut Ctx, a: Inflate) -> Result<Out> {
     let keep = PlaneArg::keep(&a.keep_plane);
-    edit_mesh(ctx, &a.object, Some(&a.elements), "inflate", |m, s| {
+    edit_mesh_mirrored(ctx, &a.object, Some(&a.elements), "inflate", a.mirror, |m, s| {
         let verts = s.touched_verts(m);
         polly_core::ops::shell::inflate(m, &verts, a.distance, keep)?;
         Ok(Default::default())
@@ -756,4 +777,50 @@ fn minus_one() -> f32 {
 
 fn solidify(ctx: &mut Ctx, a: Solidify) -> Result<Out> {
     edit_mesh(ctx, &a.object, Some(&a.elements), "solidify", |m, s| extrude::solidify(m, &s.implied_faces(m), a.thickness, a.offset))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SetPositions {
+    object: Option<String>,
+    /// {"v12": [x, y, z], ...} in object space.
+    positions: Option<std::collections::BTreeMap<String, [f32; 3]>>,
+    /// A JSON file with such a map, or export_mesh output (vertex_ids + vertices).
+    path: Option<String>,
+    /// Mirror partners across x = 0 follow.
+    #[serde(default)]
+    mirror: bool,
+}
+
+fn set_positions(ctx: &mut Ctx, a: SetPositions) -> Result<Out> {
+    let targets: Vec<(u32, Vec3)> = match (&a.positions, &a.path) {
+        (Some(map), None) => map
+            .iter()
+            .map(|(k, p)| Ok((vert_ids(std::slice::from_ref(k))?[0], Vec3::from_array(*p))))
+            .collect::<Result<_>>()?,
+        (None, Some(path)) => {
+            let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+            let v: serde_json::Value = serde_json::from_str(&text)?;
+            if let (Some(ids), Some(ps)) = (v.get("vertex_ids"), v.get("vertices")) {
+                let ids: Vec<u32> = serde_json::from_value(ids.clone())?;
+                let ps: Vec<[f32; 3]> = serde_json::from_value(ps.clone())?;
+                if ids.len() != ps.len() {
+                    anyhow::bail!("vertex_ids and vertices differ in length");
+                }
+                ids.into_iter().zip(ps).map(|(i, p)| (i, Vec3::from_array(p))).collect()
+            } else {
+                let map: std::collections::BTreeMap<String, [f32; 3]> = serde_json::from_value(v)?;
+                map.iter().map(|(k, p)| Ok((vert_ids(std::slice::from_ref(k))?[0], Vec3::from_array(*p)))).collect::<Result<_>>()?
+            }
+        }
+        _ => anyhow::bail!("give either `positions` or `path`"),
+    };
+    edit_mesh_mirrored(ctx, &a.object, None, "set positions", a.mirror, |m, _| {
+        for (id, p) in &targets {
+            match m.verts.get_mut(id) {
+                Some(v) => v.pos = *p,
+                None => return invalid(format!("no vertex v{id}")),
+            }
+        }
+        Ok(Selection { verts: targets.iter().map(|(i, _)| *i).collect(), ..Default::default() })
+    })
 }

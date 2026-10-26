@@ -44,7 +44,9 @@ Workflow that works well
    - Organic shaping: move/rotate/scale with `falloff` (soft selection; `connected: true` to leave nearby separate parts alone).
    - Single-sided sheets (hair, cloth, leaves): solidify to give them thickness.
    - Symmetric parts: build one side, then mirror_object for the other (names swap .L/.R), or mirror for a symmetric single mesh.
-   - Scripted geometry: compute it in a script and pass a file (add_mesh `path`, .obj or .json) instead of pasting numbers; export_mesh writes any object (with vertex/face ids) for scripts to read. Both avoid list_* row limits.
+   - Scripted geometry: compute it in a script and pass a file (add_mesh `path`, .obj or .json) instead of pasting numbers; export_mesh writes any object (with vertex/face ids) for scripts to read. Both avoid list_* row limits. To rebuild an existing object, use replace_geometry (keeps its name, materials, slots and rig; same vertex layout keeps all ids), not delete + add.
+   - Many exact positions at once: set_positions (a map of ids, or a file). Symmetric models: move/rotate/scale/set_position/set_positions/inflate take `mirror: true`, so the partner vertex across x = 0 follows.
+   - Selection helpers: {"by":"facing"} picks vertices by normal direction; {"by":"outline","view":[0,0,-1]} the silhouette in a view; a ring at a height within a part = select the part, then select a thin box with mode "intersect".
 4. UV: mark seams (or auto_seams), unwrap with a small texture size (e.g. 64x64) and pixel snapping; inspect with render_uv_layout.
    - Tubes (sleeves, legs, torsos): cut where it's least visible with seam_plane (centre back, inner leg) or seam_path through a few waypoint vertices, rather than relying on auto_seams.
 5. Paint: create_texture (optionally palette-locked), assign it through a material, fill_faces / draw / paint_stroke, check render.

@@ -72,12 +72,49 @@ pub fn edit_mesh(
         report["result"] = result.to_json();
         report["note"] = json!("result elements are now the object's selection");
     }
-    let warnings = o.mesh.validate();
+    // Only problems this edit introduced; older ones are summarised in one line.
+    let (was, now) = (before.problems(), o.mesh.problems());
+    let warnings = now.new_since(&was);
     if !warnings.is_empty() {
         report["warnings"] = json!(warnings);
     }
+    if !was.is_empty() && !now.is_empty() {
+        report["earlier_warnings"] = json!("the mesh still has earlier problems (describe_mesh lists them)");
+    }
     let out = Out::json(report);
     crate::tools::view::maybe_preview(ctx, id, out)
+}
+
+/// [`edit_mesh`] that optionally makes the edit symmetric across the object's
+/// X = 0 plane: moved vertices' mirror partners follow (see `ops::symmetry`).
+pub fn edit_mesh_mirrored(
+    ctx: &mut Ctx,
+    object: &Option<String>,
+    ids: Option<&Option<Vec<String>>>,
+    label: &str,
+    mirror: bool,
+    f: impl FnOnce(&mut Mesh, &Selection) -> polly_core::Result<Selection>,
+) -> Result<Out> {
+    let report = std::cell::RefCell::new(None);
+    let mut out = edit_mesh(ctx, object, ids, label, |m, s| {
+        let before = mirror.then(|| m.clone());
+        let r = f(m, s)?;
+        if let Some(b) = before {
+            *report.borrow_mut() = Some(polly_core::ops::symmetry::mirror_edit(&b, m));
+        }
+        Ok(r)
+    })?;
+    if let Some(r) = report.into_inner() {
+        out.json["mirror"] = json!({"partners_moved": r.mirrored});
+        if !r.unpaired.is_empty() {
+            out.json["mirror"]["unpaired"] = json!(format!(
+                "{} edited vertices have no mirror partner across x = 0 (their other side didn't follow): {}",
+                r.unpaired.len(),
+                polly_core::ids::compress("v", r.unpaired.iter().copied())
+            ));
+        }
+    }
+    Ok(out)
 }
 
 /// Run a scene-level edit as an undoable step.

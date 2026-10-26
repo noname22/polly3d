@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -27,6 +27,12 @@ pub fn tools() -> Vec<ToolDef> {
             "Add a new object from a primitive shape (cube, plane, cylinder/cone, uv_sphere, ico_sphere, torus, lathe, prism). Primitives are centered on the origin, Y up; the new object becomes active. Low-poly defaults (e.g. 8 segments).",
             false,
             add_primitive,
+        ),
+        def(
+            "replace_geometry",
+            "Swap an object's mesh for new geometry (a .obj/.json file or inline data) while keeping the object: name, transform, parent, materials, gear slots, rig binding and attached children. If the new mesh has the same vertices and face loops in the same order (e.g. edited export_mesh output), only positions (and given uvs/parts) change and all ids, weights and morphs are kept; otherwise skin weights are transferred from the old mesh. Use it to rebuild a mesh from a script instead of delete + add.",
+            false,
+            replace_geometry,
         ),
         def(
             "add_mesh",
@@ -327,8 +333,107 @@ fn duplicate_object(ctx: &mut Ctx, a: Duplicate) -> Result<Out> {
 
 fn delete_object(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
     let id = resolve(&ctx.doc.scene, &a.object)?;
+    let slot = ctx.doc.scene.variants_of(id).map(|(s, vs)| (s.to_string(), vs.join(", ")));
     let o = edit_scene(ctx, "delete object", |s| s.remove_object(id))?;
-    Ok(ok(format!("deleted '{}'", o.name)))
+    let mut j = json!({"result": format!("deleted '{}'", o.name)});
+    if let Some((slot, vs)) = slot {
+        j["note"] = json!(format!("it was removed from slot '{slot}' (variant {vs}); to rebuild a mesh in place, use replace_geometry instead"));
+    }
+    Ok(Out::json(j))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ReplaceGeometry {
+    object: Option<String>,
+    /// A .obj or .json file (export_mesh's format)...
+    path: Option<String>,
+    /// ...or inline vertices and faces (as add_mesh).
+    #[serde(default)]
+    vertices: Vec<[f32; 3]>,
+    #[serde(default)]
+    faces: Vec<Vec<usize>>,
+}
+
+fn replace_geometry(ctx: &mut Ctx, a: ReplaceGeometry) -> Result<Out> {
+    use polly_export::meshio;
+    let s = &ctx.doc.scene;
+    let id = resolve(s, &a.object)?;
+    let data = match &a.path {
+        Some(p) if a.vertices.is_empty() && a.faces.is_empty() => meshio::read_mesh_file(std::path::Path::new(p))?,
+        Some(_) => bail!("give either `path` or inline `vertices`/`faces`, not both"),
+        None => meshio::MeshData { vertices: a.vertices.clone(), faces: a.faces.clone(), ..Default::default() },
+    };
+    let old = s.object(id)?.mesh.clone();
+    // Same layout (vertex count and face loops in id order): update in place, keeping ids.
+    let index: std::collections::HashMap<u32, usize> = old.verts.keys().enumerate().map(|(i, v)| (*v, i)).collect();
+    let same = data.vertices.len() == old.verts.len()
+        && data.faces.len() == old.faces.len()
+        && old.faces.values().zip(&data.faces).all(|(f, d)| f.verts.iter().map(|v| index[v]).eq(d.iter().copied()));
+    let mut notes = Vec::new();
+    let mesh = if same {
+        let mut m = (*old).clone();
+        for (v, p) in m.verts.values_mut().zip(&data.vertices) {
+            v.pos = Vec3::from_array(*p);
+        }
+        for (i, f) in m.faces.values_mut().enumerate() {
+            if let Some(uv) = data.uvs.as_ref().map(|u| &u[i]).filter(|uv| uv.len() == f.corners.len()) {
+                for (c, t) in f.corners.iter_mut().zip(uv) {
+                    c.uv = polly_core::glam::Vec2::from_array(*t);
+                }
+            }
+            if let Some(p) = data.parts.as_ref().map(|p| p[i].clone()) {
+                f.part = p;
+            }
+            if let Some(sm) = data.smooth.as_ref().map(|sm| sm[i]) {
+                f.smooth = sm;
+            }
+        }
+        m
+    } else {
+        let mut m = meshio::mesh_from_data(&data)?;
+        // The object's main material for every face.
+        let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+        for f in old.faces.values() {
+            *counts.entry(f.material).or_default() += 1;
+        }
+        if let Some((mat, _)) = counts.into_iter().max_by_key(|(_, n)| *n) {
+            for f in m.faces.values_mut() {
+                f.material = mat;
+            }
+        }
+        if !old.weights.is_empty() {
+            polly_core::anim::transfer_weights(&mut m, polly_core::glam::Mat4::IDENTITY, &old, polly_core::glam::Mat4::IDENTITY)?;
+            notes.push("skin weights transferred from the old mesh (check with weight_report)".to_string());
+        }
+        if !old.morphs.is_empty() {
+            notes.push(format!("{} morph(s) dropped: they need the old vertices", old.morphs.len()));
+        }
+        let stale: Vec<String> = s
+            .slots
+            .values()
+            .flat_map(|sl| &sl.variants)
+            .flat_map(|v| &v.hides)
+            .filter(|h| h.object == id && h.faces.is_some())
+            .map(|h| h.part.clone())
+            .collect();
+        if !stale.is_empty() {
+            notes.push(format!("hide rules {} refer to the old faces: re-run auto_hide", stale.join(", ")));
+        }
+        notes.push("new vertex and face ids; seams, sharp edges and per-face materials start fresh".into());
+        m
+    };
+    edit_scene(ctx, "replace geometry", |s| {
+        let o = s.object_mut(id)?;
+        o.mesh = Arc::new(mesh);
+        o.selection = Default::default();
+        Ok(())
+    })?;
+    let mut j = object_summary(&ctx.doc.scene, id);
+    j["kept_ids"] = json!(same);
+    if !notes.is_empty() {
+        j["notes"] = json!(notes);
+    }
+    super::view::maybe_preview(ctx, id, Out::json(j))
 }
 
 #[derive(Deserialize, JsonSchema)]

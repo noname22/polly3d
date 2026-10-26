@@ -369,13 +369,11 @@ impl Mesh {
     }
 
     /// Structural warnings for the agent.
-    pub fn validate(&self) -> Vec<String> {
-        let mut w = Vec::new();
+    /// Topology and geometry problems, structured so edits can report only
+    /// the ones they introduced (see [`Problems::new_since`]).
+    pub fn problems(&self) -> Problems {
         let ef = self.edge_faces();
         let nonmanifold = ef.values().filter(|f| f.len() > 2).count();
-        if nonmanifold > 0 {
-            w.push(format!("{nonmanifold} non-manifold edge(s) (shared by >2 faces)"));
-        }
         // Inconsistent winding: two faces traversing an edge in the same direction.
         let mut dir: HashMap<(VertId, VertId), u32> = HashMap::new();
         for f in self.faces.values() {
@@ -384,18 +382,13 @@ impl Mesh {
             }
         }
         let flipped = dir.iter().filter(|(_, c)| **c > 1).count();
-        if flipped > 0 {
-            w.push(format!(
-                "{flipped} edge(s) with inconsistent winding (adjacent faces disagree on orientation; try recalc_normals)"
-            ));
-        }
-        let mut degenerate = Vec::new();
-        let mut nonplanar = Vec::new();
+        let mut degenerate = BTreeSet::new();
+        let mut nonplanar = BTreeSet::new();
         for (&id, f) in &self.faces {
             let p = self.face_positions(f);
             let nv = newell_vector(&p);
             if nv.length() < 1e-8 {
-                degenerate.push(crate::ids::face(id));
+                degenerate.insert(id);
                 continue;
             }
             if p.len() > 3 {
@@ -404,22 +397,17 @@ impl Mesh {
                 let size = p.iter().map(|q| (*q - c).length()).fold(0.0, f32::max);
                 let dev = p.iter().map(|q| (*q - c).dot(n).abs()).fold(0.0, f32::max);
                 if dev > 0.02 * size.max(1e-6) {
-                    nonplanar.push(crate::ids::face(id));
+                    nonplanar.insert(id);
                 }
             }
         }
-        if !degenerate.is_empty() {
-            w.push(format!("degenerate (zero-area) faces: {}", short_list(&degenerate)));
-        }
-        if !nonplanar.is_empty() {
-            w.push(format!("non-planar faces (consider triangulate): {}", short_list(&nonplanar)));
-        }
         let used: BTreeSet<VertId> = self.faces.values().flat_map(|f| f.verts.iter().copied()).collect();
-        let loose = self.verts.len() - used.len();
-        if loose > 0 {
-            w.push(format!("{loose} loose vertex/vertices not used by any face"));
-        }
-        w
+        Problems { nonmanifold, flipped, degenerate, nonplanar, loose: self.verts.len() - used.len() }
+    }
+
+    pub fn validate(&self) -> Vec<String> {
+        let p = self.problems();
+        p.describe(p.nonmanifold, p.flipped, &p.degenerate, &p.nonplanar, p.loose)
     }
 
     pub fn transform(&mut self, m: glam::Mat4) {
@@ -499,4 +487,53 @@ pub fn newell_vector(p: &[Vec3]) -> Vec3 {
 
 pub fn newell_normal(p: &[Vec3]) -> Vec3 {
     newell_vector(p).normalize_or_zero()
+}
+
+/// Problems found by [`Mesh::problems`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Problems {
+    pub nonmanifold: usize,
+    pub flipped: usize,
+    pub degenerate: BTreeSet<FaceId>,
+    pub nonplanar: BTreeSet<FaceId>,
+    pub loose: usize,
+}
+
+impl Problems {
+    pub fn is_empty(&self) -> bool {
+        *self == Problems::default()
+    }
+
+    fn describe(&self, nonmanifold: usize, flipped: usize, degenerate: &BTreeSet<FaceId>, nonplanar: &BTreeSet<FaceId>, loose: usize) -> Vec<String> {
+        let mut w = Vec::new();
+        if nonmanifold > 0 {
+            w.push(format!("{nonmanifold} non-manifold edge(s) (shared by >2 faces)"));
+        }
+        if flipped > 0 {
+            w.push(format!("{flipped} edge(s) with inconsistent winding (adjacent faces disagree on orientation; try recalc_normals)"));
+        }
+        let list = |s: &BTreeSet<FaceId>| short_list(&s.iter().map(|f| crate::ids::face(*f)).collect::<Vec<_>>());
+        if !degenerate.is_empty() {
+            w.push(format!("degenerate (zero-area) faces: {}", list(degenerate)));
+        }
+        if !nonplanar.is_empty() {
+            w.push(format!("non-planar faces (consider triangulate): {}", list(nonplanar)));
+        }
+        if loose > 0 {
+            w.push(format!("{loose} loose vertex/vertices not used by any face"));
+        }
+        w
+    }
+
+    /// Warnings for what got worse compared with `before` (problems the edit introduced).
+    pub fn new_since(&self, before: &Problems) -> Vec<String> {
+        let more = |a: usize, b: usize| a.saturating_sub(b);
+        self.describe(
+            more(self.nonmanifold, before.nonmanifold),
+            more(self.flipped, before.flipped),
+            &self.degenerate.difference(&before.degenerate).copied().collect(),
+            &self.nonplanar.difference(&before.nonplanar).copied().collect(),
+            more(self.loose, before.loose),
+        )
+    }
 }

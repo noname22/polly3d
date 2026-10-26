@@ -180,7 +180,24 @@ fn render(ctx: &mut Ctx, a: RenderArgs) -> Result<Out> {
     let o = options(&ctx.doc.scene, &a, 512)?;
     let (shown, plays, variants) = display_scene(ctx, &a)?;
     let r = ctx.services.renderer()?.render(&shown, &o)?;
-    report(ctx, &r, plays, variants)
+    let mut out = report(ctx, &r, plays, variants)?;
+    if o.overlays.selection {
+        let selected: Vec<String> = shown
+            .objects
+            .values()
+            .filter(|ob| ob.visible)
+            .map(|ob| (ob, ob.selection.implied_faces(&ob.mesh).len()))
+            .filter(|(_, n)| *n > 0)
+            .map(|(ob, n)| format!("{} ({n} faces)", ob.name))
+            .collect();
+        if !selected.is_empty() {
+            out.json["selection"] = json!(format!(
+                "orange tint = selected faces: {}. Not a material; clear with select {{\"by\":\"ids\",\"ids\":[]}} or render with overlays {{\"selection\": false}}",
+                selected.join(", ")
+            ));
+        }
+    }
+    Ok(out)
 }
 
 fn contact_sheet(ctx: &mut Ctx, a: RenderArgs) -> Result<Out> {

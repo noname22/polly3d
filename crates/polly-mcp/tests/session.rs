@@ -1283,3 +1283,99 @@ fn reference_measure_and_compare() {
     }
     assert_eq!(call(&s, "list_references", json!({}))["references"][0]["opacity"], 0.5, "the scene's own opacity is unchanged");
 }
+
+/// Editing batch: replace_geometry, set_positions, mirrored edits, new queries, warnings.
+#[test]
+fn editing_batch() {
+    let s = server();
+    let dir = std::env::temp_dir().join(format!("polly-edit2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |n: &str| dir.join(n).to_str().unwrap().to_string();
+    let mesh = |s: &polly_mcp::PollyServer, name: &str| {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        g.doc.scene.objects.values().find(|o| o.name == name).unwrap().mesh.clone()
+    };
+
+    // --- replace_geometry keeps the object's setup ---
+    call(&s, "add_mesh", json!({"name": "Rig", "vertices": [], "faces": []}));
+    call(&s, "add_bone_chain", json!({"object": "Rig", "points": [[0, 0, 0], [0, 1, 0], [0, 2, 0]], "names": ["low", "high"]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "segments": 8, "height_segments": 4, "height": 2.0}, "name": "Body", "position": [0, 1, 0]}));
+    call(&s, "create_material", json!({"name": "Skin", "color": "#e0a080"}));
+    call(&s, "assign_material", json!({"object": "Body", "elements": ["all"], "material": "Skin"}));
+    call(&s, "bind_to_armature", json!({"object": "Body", "armature": "Rig"}));
+    call(&s, "auto_weights", json!({"object": "Body"}));
+    call(&s, "add_variant", json!({"slot": "body", "variant": "base", "objects": ["Body"]}));
+    // Same layout: export, scale the x coordinates in the "script", replace. Ids survive.
+    call(&s, "export_mesh", json!({"object": "Body", "path": p("body.json")}));
+    let mut j: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("body.json")).unwrap()).unwrap();
+    for v in j["vertices"].as_array_mut().unwrap() {
+        v[0] = json!(v[0].as_f64().unwrap() * 1.5);
+    }
+    std::fs::write(dir.join("body.json"), j.to_string()).unwrap();
+    let before = mesh(&s, "Body");
+    let r = call(&s, "replace_geometry", json!({"object": "Body", "path": p("body.json")}));
+    assert_eq!(r["kept_ids"], true, "{r}");
+    let after = mesh(&s, "Body");
+    assert_eq!(before.verts.keys().collect::<Vec<_>>(), after.verts.keys().collect::<Vec<_>>());
+    assert_eq!(before.weights, after.weights);
+    assert!(r.to_string().contains("body: base"), "slot kept: {r}");
+    // Different layout: a fresh mesh, weights transferred, the main material kept.
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "segments": 12, "height_segments": 6, "height": 2.0}, "name": "Tmp", "position": [0, 1, 0]}));
+    call(&s, "export_mesh", json!({"object": "Tmp", "path": p("tmp.obj")}));
+    call(&s, "delete_object", json!({"object": "Tmp"}));
+    let r = call(&s, "replace_geometry", json!({"object": "Body", "path": p("tmp.obj")}));
+    assert_eq!(r["kept_ids"], false);
+    assert!(r["notes"].to_string().contains("weights transferred"), "{r}");
+    let m = mesh(&s, "Body");
+    assert_eq!(m.faces.len(), 12 * 6 + 2);
+    assert!(!m.weights.is_empty());
+    assert!(m.faces.values().all(|f| f.material == 1), "the main material");
+    // delete_object says what it removed from slots.
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Hat"}));
+    call(&s, "add_variant", json!({"slot": "head", "variant": "hat", "objects": ["Hat"]}));
+    let r = call(&s, "delete_object", json!({"object": "Hat"}));
+    assert!(r["note"].as_str().unwrap().contains("slot 'head'"), "{r}");
+
+    // --- set_positions and mirrored edits ---
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [2, 2, 2]}, "name": "Box"}));
+    let pos = |s: &polly_mcp::PollyServer, at: [f32; 3]| {
+        let m = mesh(s, "Box");
+        *m.verts.iter().find(|(_, v)| v.pos.distance(polly_core::glam::Vec3::from(at)) < 1e-4).map(|(i, _)| i).unwrap_or_else(|| panic!("no vertex at {at:?}"))
+    };
+    let (a, b) = (pos(&s, [1.0, 1.0, 1.0]), pos(&s, [-1.0, 1.0, 1.0]));
+    let r = call(&s, "move", json!({"object": "Box", "elements": [format!("v{a}")], "offset": [0.5, 0.2, 0], "mirror": true}));
+    assert_eq!(r["mirror"]["partners_moved"], 1, "{r}");
+    pos(&s, [1.5, 1.2, 1.0]);
+    pos(&s, [-1.5, 1.2, 1.0]);
+    call(&s, "set_positions", json!({"object": "Box", "positions": {format!("v{a}"): [1.1, 1.0, 1.0]}, "mirror": true}));
+    pos(&s, [-1.1, 1.0, 1.0]);
+    assert_eq!(pos(&s, [-1.1, 1.0, 1.0]), b);
+    std::fs::write(dir.join("pos.json"), json!({"vertex_ids": [a], "vertices": [[1.0, 1.0, 1.0]]}).to_string()).unwrap();
+    call(&s, "set_positions", json!({"object": "Box", "path": p("pos.json"), "mirror": true}));
+    pos(&s, [-1.0, 1.0, 1.0]);
+    call_err(&s, "set_positions", json!({"object": "Box", "positions": {"v99999": [0, 0, 0]}}));
+
+    // --- queries ---
+    let r = call(&s, "select", json!({"object": "Box", "query": {"by": "facing", "direction": [0, 1, 0], "max_angle": 60}}));
+    assert_eq!(r["selection"]["counts"]["verts"], 4, "the top corners (normals tilt 54.7 deg): {r}");
+    let r = call(&s, "select", json!({"object": "Box", "query": {"by": "outline", "view": [0, 0, -1]}}));
+    assert_eq!(r["selection"]["counts"]["edges"], 4, "a cube's front silhouette is the 4 side edges: {r}");
+
+    // --- warnings: only new problems ---
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Warp"}));
+    let w = mesh(&s, "Warp");
+    let v = *w.verts.iter().find(|(_, v)| v.pos.x > 0.4 && v.pos.y > 0.4 && v.pos.z > 0.4).unwrap().0;
+    let r = call(&s, "move", json!({"object": "Warp", "elements": [format!("v{v}")], "offset": [0, 0.4, 0]}));
+    assert!(r["warnings"].to_string().contains("non-planar"), "{r}");
+    let r = call(&s, "move", json!({"object": "Warp", "elements": ["all"], "offset": [0, 0.1, 0]}));
+    assert!(r.get("warnings").is_none() && r["earlier_warnings"].is_string(), "old problems are not repeated: {r}");
+
+    // --- the render explains the orange tint ---
+    let r = s.call("render", json!({"view": "front"}));
+    if r.is_error != Some(true) {
+        let j: Value = serde_json::from_str(&text(&r)).unwrap();
+        assert!(j["selection"].as_str().unwrap().contains("Warp"), "{j}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

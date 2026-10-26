@@ -22,6 +22,16 @@ pub enum Query {
         #[serde(default = "thirty")]
         max_angle: f32,
     },
+    /// Vertices whose smooth normal (averaged over their faces) is within `max_angle` degrees of `direction`.
+    Facing {
+        direction: [f32; 3],
+        #[serde(default = "thirty")]
+        max_angle: f32,
+    },
+    /// The silhouette seen looking along `view` (front = [0, 0, -1], right = [-1, 0, 0], top = [0, -1, 0]):
+    /// edges between a face turned towards the viewer and one turned away, plus open borders, and their vertices.
+    /// Includes inner contours; intersect with a box or part to narrow it down.
+    Outline { view: [f32; 3] },
     /// Vertices inside the axis-aligned box, faces whose center is inside, edges with both ends inside.
     Box { min: [f32; 3], max: [f32; 3] },
     /// Elements on the positive side of a plane (dot(p - point, normal) > threshold).
@@ -81,6 +91,28 @@ pub fn run(mesh: &Mesh, q: &Query, current: &Selection) -> Result<Selection> {
             for (&id, f) in &mesh.faces {
                 if mesh.face_normal(f).dot(d) >= cos - 1e-6 {
                     s.faces.insert(id);
+                }
+            }
+        }
+        Query::Facing { direction, max_angle } => {
+            let d = Vec3::from_array(*direction).normalize_or_zero();
+            let cos = max_angle.to_radians().cos();
+            let normals = crate::ops::shell::vertex_normals(mesh);
+            s.verts = normals.iter().filter(|(_, n)| n.dot(d) >= cos - 1e-6).map(|(v, _)| *v).collect();
+        }
+        Query::Outline { view } => {
+            let d = Vec3::from_array(*view).normalize_or_zero();
+            for (e, fs) in mesh.edge_faces() {
+                let toward = |f: &crate::mesh::FaceId| mesh.face_normal(&mesh.faces[f]).dot(d) < 0.0;
+                let contour = match fs.len() {
+                    1 => true,
+                    2 => toward(&fs[0]) != toward(&fs[1]),
+                    _ => false,
+                };
+                if contour {
+                    s.edges.insert(e);
+                    s.verts.insert(e.0);
+                    s.verts.insert(e.1);
                 }
             }
         }
