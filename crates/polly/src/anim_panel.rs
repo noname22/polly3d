@@ -1,22 +1,16 @@
 //! The viewer's animation panel: transport, timeline with loop handles, clip
 //! blend weights and morph sliders.
 //!
-//! Playback state (time, play/pause, clip weights, morph slider values) is a
-//! preview that lives only in the viewer. Moving a loop handle is a real edit
-//! of the clip, returned as a [`LoopEdit`] for the caller to commit.
+//! Everything here is a preview that lives only in the viewer: playback time,
+//! play/pause, clip weights, morph slider values and loop regions moved with
+//! the handles (applied to the display copy by [`AnimState::apply_loops`]).
+//! The scene's clips are never changed.
 
 use std::collections::BTreeMap;
 
 use egui::{Color32, Rect, Sense, Stroke, pos2, vec2};
 use polly_core::anim::{ClipId, ClipPlay};
 use polly_core::scene::{ObjectId, Scene};
-
-/// A loop region change made in the panel (seconds).
-pub struct LoopEdit {
-    pub clip: ClipId,
-    pub start: f32,
-    pub end: f32,
-}
 
 #[derive(Clone, Copy)]
 struct ClipMix {
@@ -45,6 +39,8 @@ pub struct AnimState {
     grab: Option<Grab>,
     /// Loop handles while being dragged (seconds).
     drag_loop: Option<(f32, f32)>,
+    /// Loop regions set with the handles (seconds), overriding the clips'.
+    loops: BTreeMap<ClipId, (f32, f32)>,
 }
 
 impl AnimState {
@@ -59,6 +55,16 @@ impl AnimState {
             self.focus = self.mix.iter().find(|(_, m)| m.enabled).map(|(id, _)| *id).or(scene.clips.keys().next().copied());
         }
         self.morphs.retain(|(o, m), _| scene.objects.get(o).is_some_and(|ob| ob.mesh.morphs.iter().any(|x| &x.name == m)));
+    }
+
+    /// Lay the user's loop regions over the clips of a display copy.
+    pub fn apply_loops(&mut self, scene: &mut Scene) {
+        self.loops.retain(|id, _| scene.clips.contains_key(id));
+        for (id, (start, end)) in &self.loops {
+            let c = scene.clips.get_mut(id).unwrap();
+            c.loop_start = start.clamp(0.0, c.length);
+            c.loop_end = Some(end.clamp(c.loop_start, c.length));
+        }
     }
 
     pub fn has_content(scene: &Scene) -> bool {
@@ -120,20 +126,21 @@ impl AnimState {
     }
 }
 
-/// Draw the panel. Returns a loop edit when the user released a loop handle.
-pub fn panel(ui: &mut egui::Ui, st: &mut AnimState, scene: &Scene) -> Option<LoopEdit> {
+/// Draw the panel.
+pub fn panel(ui: &mut egui::Ui, st: &mut AnimState, scene: &Scene) {
     st.sync(scene);
-    let mut edit = None;
     if !scene.clips.is_empty() {
         transport(ui, st, scene);
         if let Some(id) = st.focus {
-            edit = timeline(ui, st, scene, id);
+            timeline(ui, st, scene, id);
+            if st.loops.contains_key(&id) && ui.small_button("Reset loop").on_hover_text("back to the clip's own loop region").clicked() {
+                st.loops.remove(&id);
+            }
         }
         ui.add_space(4.0);
         clips(ui, st, scene);
     }
     morphs(ui, st, scene);
-    edit
 }
 
 fn transport(ui: &mut egui::Ui, st: &mut AnimState, scene: &Scene) {
@@ -155,7 +162,7 @@ fn transport(ui: &mut egui::Ui, st: &mut AnimState, scene: &Scene) {
 }
 
 /// Timeline of the focused clip: ticks, loop region, playhead, loop handles.
-fn timeline(ui: &mut egui::Ui, st: &mut AnimState, scene: &Scene, id: ClipId) -> Option<LoopEdit> {
+fn timeline(ui: &mut egui::Ui, st: &mut AnimState, scene: &Scene, id: ClipId) {
     let clip = &scene.clips[&id];
     let frames = (clip.length * clip.fps).max(1.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click_and_drag());
@@ -166,7 +173,6 @@ fn timeline(ui: &mut egui::Ui, st: &mut AnimState, scene: &Scene, id: ClipId) ->
     let (mut ls, mut le) = st.drag_loop.unwrap_or_else(|| clip.loop_range());
 
     // Interaction.
-    let mut edit = None;
     if resp.drag_started() || resp.clicked() {
         // Where the button went down: by the time a drag is recognised the
         // pointer has already moved away from a small handle.
@@ -197,7 +203,7 @@ fn timeline(ui: &mut egui::Ui, st: &mut AnimState, scene: &Scene, id: ClipId) ->
     }
     if resp.drag_stopped() || resp.clicked() {
         if matches!(st.grab, Some(Grab::LoopStart | Grab::LoopEnd)) {
-            edit = Some(LoopEdit { clip: id, start: ls, end: le });
+            st.loops.insert(id, (ls, le));
         }
         st.grab = None;
         st.drag_loop = None;
@@ -236,8 +242,7 @@ fn timeline(ui: &mut egui::Ui, st: &mut AnimState, scene: &Scene, id: ClipId) ->
     }
     let head = x_of(clip.playback_time(st.time));
     p.line_segment([pos2(head, rect.top() + 4.0), pos2(head, track.bottom())], Stroke::new(2.0, Color32::from_rgb(250, 200, 60)));
-    resp.on_hover_text("click/drag: scrub · drag the blue triangles: loop region");
-    edit
+    resp.on_hover_text("click/drag: scrub · drag the blue triangles: loop region (only in this window)");
 }
 
 fn clips(ui: &mut egui::Ui, st: &mut AnimState, scene: &Scene) {

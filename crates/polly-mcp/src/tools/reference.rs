@@ -71,8 +71,9 @@ fn default_center(view: RefView, size: f32) -> [f32; 2] {
     }
 }
 
-fn r4(x: f32) -> f32 {
-    (x * 10000.0).round() / 10000.0 + 0.0
+/// Rounded in f64 so the JSON shows 0.9, not 0.8999999761581421.
+fn r4(x: f32) -> f64 {
+    (x as f64 * 10000.0).round() / 10000.0 + 0.0
 }
 
 fn ref_json(r: &Reference) -> Value {
@@ -85,10 +86,10 @@ fn ref_json(r: &Reference) -> Value {
         "crop": r.rect(),
         "center": r.center.map(r4),
         "size": [r4(e.x), r4(e.y)],
-        "world_per_pixel": (r.scale() * 1e5).round() / 1e5,
+        "world_per_pixel": (r.scale() as f64 * 1e5).round() / 1e5,
         "corners": {
-            "top_left": round3(q[0].0),
-            "bottom_right": round3(q[2].0),
+            "top_left": q[0].0.to_array().map(r4),
+            "bottom_right": q[2].0.to_array().map(r4),
         },
         "layer": r.layer,
         "opacity": r4(r.opacity),

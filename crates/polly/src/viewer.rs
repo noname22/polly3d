@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use egui::load::SizedTexture;
+use polly_core::reference::{Layer, RefView, Reference};
 use polly_core::scene::{Filter, Scene};
 
 use crate::anim_panel::{self, AnimState};
@@ -112,9 +113,8 @@ struct ViewState {
     zoom: f32,
     overlays: Overlays,
     filter: Option<Filter>,
-    /// Reference opacity being dragged in the panel: (scene, reference, value).
-    /// Shown live, saved to the scene when the drag ends.
-    ref_opacity: Option<(String, String, f32)>,
+    /// Reference image settings and the user's own references, per scene name.
+    refs: HashMap<String, RefState>,
     /// An open "Add reference" file dialog: (scene, view, picked file).
     ref_pick: Option<(String, polly_core::reference::RefView, std::sync::mpsc::Receiver<Option<std::path::PathBuf>>)>,
 }
@@ -338,39 +338,34 @@ fn build_ui(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, workspace: &
             return Ok(true);
         };
         if let Some(snap) = snaps.into_iter().next() {
-            // Gear variants: preview choices in a side panel (not saved to the scene).
+            // The viewer never edits the scene: everything the user changes here
+            // is a local override applied to this copy.
+            let mut scene = snap.scene;
+            let agent_refs = scene.references.clone();
+            view.anim.entry(name.clone()).or_default().apply_loops(&mut scene);
+            view.refs.entry(name.clone()).or_default().apply(&mut scene);
+            // Gear variants: preview choices in a side panel.
             let choice = view.variants.entry(name.clone()).or_default();
-            choice.retain(|slot, v| snap.scene.slots.get(slot).is_some_and(|s| s.variants.iter().any(|x| &x.name == v)));
-            if !snap.scene.slots.is_empty() {
-                egui::Panel::right("variants").show(ui, |ui| variants_panel(ui, &snap.scene, choice));
+            choice.retain(|slot, v| scene.slots.get(slot).is_some_and(|s| s.variants.iter().any(|x| &x.name == v)));
+            if !scene.slots.is_empty() {
+                egui::Panel::right("variants").show(ui, |ui| variants_panel(ui, &scene, choice));
             }
-            let mut chosen = polly_core::variants::variant_view(&snap.scene, choice);
-            if !snap.scene.references.is_empty() {
-                egui::Panel::right("references").show(ui, |ui| references_panel(ui, view, workspace, name, &snap.scene));
+            let chosen = polly_core::variants::variant_view(&scene, choice);
+            if !scene.references.is_empty() {
+                egui::Panel::right("references").show(ui, |ui| references_panel(ui, view, name, &agent_refs));
             }
-            if let Some((sc, r, o)) = &view.ref_opacity
-                && sc == name
-                && let Ok(r) = chosen.reference_mut(r)
-            {
-                r.opacity = *o;
-            }
-            incoming_references(ui, view, workspace, name, &snap.scene);
+            incoming_references(ui, view, name);
             let st = view.anim.entry(name.clone()).or_default();
             let dt = ui.input(|i| i.stable_dt).min(0.1);
-            st.advance(&snap.scene, dt);
-            if ui.input(|i| i.key_pressed(egui::Key::Space)) && !snap.scene.clips.is_empty() {
-                st.toggle_play(&snap.scene);
+            st.advance(&scene, dt);
+            if ui.input(|i| i.key_pressed(egui::Key::Space)) && !scene.clips.is_empty() {
+                st.toggle_play(&scene);
             }
-            if AnimState::has_content(&snap.scene) {
-                let edit = egui::Panel::bottom("animation")
-                    .show(ui, |ui| {
-                        ui.add_space(4.0);
-                        anim_panel::panel(ui, st, &snap.scene)
-                    })
-                    .inner;
-                if let Some(e) = edit {
-                    commit_loop(workspace, name, e);
-                }
+            if AnimState::has_content(&scene) {
+                egui::Panel::bottom("animation").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    anim_panel::panel(ui, st, &scene)
+                });
             }
             if st.playing() {
                 ui.ctx().request_repaint();
@@ -421,60 +416,111 @@ fn variants_panel(ui: &mut egui::Ui, scene: &Scene, choice: &mut std::collection
     }
 }
 
-/// Reference images: visibility, layer, opacity, removal. Edits are saved to
-/// the scene (undoable), so the agent sees them too.
-fn references_panel(ui: &mut egui::Ui, view: &mut ViewState, workspace: &Workspace, name: &str, scene: &Scene) {
-    use polly_core::reference::{Layer, RefView};
+/// Viewer-only reference settings for one scene.
+#[derive(Default)]
+struct RefState {
+    /// Overrides of the agent's references, by name.
+    overrides: std::collections::BTreeMap<String, RefOverride>,
+    /// References the user added in the viewer (never seen by the agent).
+    mine: Vec<Reference>,
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+struct RefOverride {
+    visible: Option<bool>,
+    layer: Option<Layer>,
+    opacity: Option<f32>,
+}
+
+impl RefState {
+    /// Lay the user's settings and references over the scene's (a display copy).
+    fn apply(&mut self, scene: &mut Scene) {
+        // Forget overrides of references the agent removed.
+        self.overrides.retain(|n, _| scene.references.iter().any(|r| &r.name == n));
+        for r in &mut scene.references {
+            if let Some(o) = self.overrides.get(&r.name) {
+                r.visible = o.visible.unwrap_or(r.visible);
+                r.layer = o.layer.unwrap_or(r.layer);
+                r.opacity = o.opacity.unwrap_or(r.opacity);
+            }
+        }
+        for m in &self.mine {
+            let mut m = m.clone();
+            // Names key the GPU cache: keep them apart from the agent's.
+            m.name = format!("{} (mine)", m.name);
+            scene.references.push(m);
+        }
+    }
+}
+
+fn ref_cam(v: RefView) -> Cam {
+    match v {
+        RefView::Front => Cam::Front,
+        RefView::Right => Cam::Right,
+        RefView::Top => Cam::Top,
+    }
+}
+
+/// Visible checkbox and view button, layer toggle and opacity slider for one
+/// reference, editing `visible`, `layer` and `opacity` in place.
+fn ref_controls(ui: &mut egui::Ui, cam: &mut Cam, label: &str, view: RefView, visible: &mut bool, layer: &mut Layer, opacity: &mut f32) {
+    ui.horizontal(|ui| {
+        ui.checkbox(visible, label);
+        let c = ref_cam(view);
+        if ui.selectable_label(*cam == c, c.label()).on_hover_text("show this view").clicked() {
+            *cam = c;
+        }
+    });
+    ui.horizontal(|ui| {
+        for (l, text) in [(Layer::Behind, "Behind"), (Layer::Front, "On top")] {
+            if ui.selectable_label(*layer == l, text).clicked() {
+                *layer = l;
+            }
+        }
+    });
+    ui.add(egui::Slider::new(opacity, 0.0..=1.0).text("opacity"));
+}
+
+/// Reference images: the agent's (with viewer-only overrides) and the user's own.
+fn references_panel(ui: &mut egui::Ui, view: &mut ViewState, name: &str, agent: &[Reference]) {
+    let st = view.refs.entry(name.to_string()).or_default();
+    let cam = &mut view.cam;
     ui.add_space(4.0);
     ui.strong("References");
+    ui.weak("Changes here affect only this window.");
     ui.add_space(4.0);
-    for r in &scene.references {
-        let cam = match r.view {
-            RefView::Front => Cam::Front,
-            RefView::Right => Cam::Right,
-            RefView::Top => Cam::Top,
-        };
-        ui.horizontal(|ui| {
-            let mut visible = r.visible;
-            if ui.checkbox(&mut visible, &r.name).changed() {
-                commit_ref(workspace, name, &r.name, "show/hide reference (viewer)", |r| r.visible = visible);
-            }
-            if ui.selectable_label(view.cam == cam, cam.label()).on_hover_text("show this view").clicked() {
-                view.cam = cam;
-            }
-        });
-        ui.horizontal(|ui| {
-            for (layer, label) in [(Layer::Behind, "Behind"), (Layer::Front, "On top")] {
-                if ui.selectable_label(r.layer == layer, label).clicked() && r.layer != layer {
-                    commit_ref(workspace, name, &r.name, "set reference layer (viewer)", |r| r.layer = layer);
-                }
-            }
-            if ui.small_button("Remove").clicked() {
-                let n = r.name.clone();
-                commit_edit(workspace, name, "remove reference (viewer)", |s| {
-                    s.references.retain(|x| x.name != n);
-                    Ok(())
-                });
-            }
-        });
-        let dragging = view.ref_opacity.as_ref().filter(|(sc, rn, _)| sc == name && rn == &r.name).map(|d| d.2);
-        let mut opacity = dragging.unwrap_or(r.opacity);
-        let resp = ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).text("opacity"));
-        if resp.changed() {
-            view.ref_opacity = Some((name.to_string(), r.name.clone(), opacity));
-        }
-        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-            view.ref_opacity = None;
-            commit_ref(workspace, name, &r.name, "set reference opacity (viewer)", |r| r.opacity = opacity);
+    for r in agent {
+        let o = st.overrides.entry(r.name.clone()).or_default();
+        let (mut visible, mut layer, mut opacity) = (o.visible.unwrap_or(r.visible), o.layer.unwrap_or(r.layer), o.opacity.unwrap_or(r.opacity));
+        ref_controls(ui, cam, &r.name, r.view, &mut visible, &mut layer, &mut opacity);
+        // Keep only what differs from the agent's settings.
+        o.visible = (visible != r.visible).then_some(visible);
+        o.layer = (layer != r.layer).then_some(layer);
+        o.opacity = (opacity != r.opacity).then_some(opacity);
+        if *o != RefOverride::default() && ui.small_button("Reset").on_hover_text("back to the agent's settings").clicked() {
+            *o = RefOverride::default();
         }
         ui.separator();
     }
-    ui.weak("Add more with the toolbar's\n\"Add reference\" button.");
+    if !st.mine.is_empty() {
+        ui.strong("Mine");
+        ui.weak("Not visible to the agent.");
+        let mut remove = None;
+        for (i, r) in st.mine.iter_mut().enumerate() {
+            ref_controls(ui, cam, &r.name, r.view, &mut r.visible, &mut r.layer, &mut r.opacity);
+            if ui.small_button("Remove").clicked() {
+                remove = Some(i);
+            }
+            ui.separator();
+        }
+        if let Some(i) = remove {
+            st.mine.remove(i);
+        }
+    }
 }
 
 /// The reference view for the current camera (Front when looking in perspective).
-fn current_ref_view(view: &mut ViewState) -> polly_core::reference::RefView {
-    use polly_core::reference::RefView;
+fn current_ref_view(view: &mut ViewState) -> RefView {
     match view.cam {
         Cam::Right => RefView::Right,
         Cam::Top => RefView::Top,
@@ -504,16 +550,18 @@ fn pick_reference(ui: &egui::Ui, view: &mut ViewState, scene: &str) {
     view.ref_pick = Some((scene.to_string(), rv, rx));
 }
 
-fn add_reference_file(workspace: &Workspace, name: &str, scene: &Scene, path: &std::path::Path, rv: polly_core::reference::RefView) {
+/// Load an image as one of the user's own references (viewer only).
+fn add_my_reference(view: &mut ViewState, name: &str, path: &std::path::Path, rv: RefView) {
+    let st = view.refs.entry(name.to_string()).or_default();
     let stem = path.file_stem().map_or("reference".into(), |s| s.to_string_lossy().into_owned());
     let mut unique = stem.clone();
     let mut n = 2;
-    while scene.references.iter().any(|r| r.name == unique) {
+    while st.mine.iter().any(|r| r.name == unique) {
         unique = format!("{stem}_{n}");
         n += 1;
     }
     match polly_mcp::tools::reference::load_reference(&path.to_string_lossy(), rv, Some(&unique)) {
-        Ok(r) => commit_edit(workspace, name, "add reference (viewer)", |s| s.set_reference(r)),
+        Ok(r) => st.mine.push(r),
         Err(e) => tracing::warn!("viewer: {e:#}"),
     }
 }
@@ -521,16 +569,15 @@ fn add_reference_file(workspace: &Workspace, name: &str, scene: &Scene, path: &s
 /// New references from the file dialog, or image files dropped on the window
 /// (X11/macOS/Windows; winit has no drag-and-drop on Wayland). They go to the
 /// current axis view.
-fn incoming_references(ui: &egui::Ui, view: &mut ViewState, workspace: &Workspace, name: &str, scene: &Scene) {
+fn incoming_references(ui: &egui::Ui, view: &mut ViewState, name: &str) {
     if let Some((sc, rv, rx)) = &view.ref_pick {
         match rx.try_recv() {
             Ok(file) => {
-                if let Some(path) = file
-                    && sc == name
-                {
-                    add_reference_file(workspace, name, scene, &path, *rv);
-                }
+                let (sc, rv) = (sc.clone(), *rv);
                 view.ref_pick = None;
+                if let Some(path) = file {
+                    add_my_reference(view, &sc, &path, rv);
+                }
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => view.ref_pick = None,
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -539,43 +586,7 @@ fn incoming_references(ui: &egui::Ui, view: &mut ViewState, workspace: &Workspac
     let dropped: Vec<std::path::PathBuf> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
     for path in dropped {
         let rv = current_ref_view(view);
-        add_reference_file(workspace, name, scene, &path, rv);
-    }
-}
-
-fn commit_ref(workspace: &Workspace, scene: &str, reference: &str, label: &str, f: impl FnOnce(&mut polly_core::reference::Reference)) {
-    commit_edit(workspace, scene, label, |s| {
-        f(s.reference_mut(reference)?);
-        Ok(())
-    });
-}
-
-/// Store a loop region dragged in the timeline as an undoable edit of the clip.
-fn commit_loop(workspace: &Workspace, scene: &str, e: anim_panel::LoopEdit) {
-    commit_edit(workspace, scene, "set loop region (viewer)", |s| {
-        let c = s.clips.get_mut(&e.clip).ok_or_else(|| polly_core::Error::Invalid("clip was deleted".into()))?;
-        c.loop_start = e.start;
-        c.loop_end = Some(e.end);
-        Ok(())
-    });
-}
-
-/// Apply a user edit from the viewer to a scene as one undoable step.
-fn commit_edit(workspace: &Workspace, scene: &str, label: &str, f: impl FnOnce(&mut Scene) -> polly_core::Result<()>) {
-    let Ok(slot) = workspace.get(scene) else { return };
-    let deadline = Instant::now() + Duration::from_millis(500);
-    let mut guard = loop {
-        match slot.try_lock() {
-            Ok(g) => break g,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
-            Err(_) => {
-                tracing::warn!("viewer: scene '{scene}' busy, '{label}' not saved");
-                return;
-            }
-        }
-    };
-    if let Err(err) = guard.doc.edit(label, f) {
-        tracing::warn!("viewer: {err}");
+        add_my_reference(view, name, &path, rv);
     }
 }
 
@@ -631,7 +642,7 @@ fn toolbar(ui: &mut egui::Ui, view: &mut ViewState, name: &str, several: bool) {
     ui.checkbox(&mut view.overlays.grid, "Grid").on_hover_text("G");
     ui.checkbox(&mut view.overlays.selection, "Selection").on_hover_text("S");
     ui.checkbox(&mut view.overlays.references, "Refs").on_hover_text("reference images (front/right/top views)");
-    if ui.add_enabled(view.ref_pick.is_none(), egui::Button::new("Add reference…")).on_hover_text("image for the current Front/Right/Top view (or drop a file on the window)").clicked() {
+    if ui.add_enabled(view.ref_pick.is_none(), egui::Button::new("Add reference…")).on_hover_text("your own image for the current Front/Right/Top view, shown only here (or drop a file on the window)").clicked() {
         pick_reference(ui, view, name);
     }
     egui::ComboBox::from_id_salt("filter")
@@ -876,7 +887,7 @@ pub fn run(el: EventLoop<ViewerCommand>, workspace: Arc<Workspace>, start_open: 
         instance,
         gfx: None,
         start_open,
-        view: ViewState { anim: HashMap::new(), variants: HashMap::new(), mode: Mode::Overview, cam: Cam::Persp, zoom: 1.0, overlays: Overlays::default(), filter: None, ref_opacity: None, ref_pick: None },
+        view: ViewState { anim: HashMap::new(), variants: HashMap::new(), mode: Mode::Overview, cam: Cam::Persp, zoom: 1.0, overlays: Overlays::default(), filter: None, refs: HashMap::new(), ref_pick: None },
         seen: None,
         error: None,
     };

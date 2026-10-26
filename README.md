@@ -18,7 +18,9 @@ cargo build --release
 ./target/release/polly --project scene.polly
 ```
 
-The live viewer is a read-only window that mirrors every edit. It is not shown
+The live viewer is a read-only window that mirrors every edit. Nothing you do
+in it changes the scene: its controls are previews that affect only that
+window, so you can inspect the agent's work without ever interfering with it. It is not shown
 by default: ask the agent to open it (`show_viewer`) when you want to watch,
 and to close it (`hide_viewer`) when you don't. Closing the window yourself has
 the same effect as `hide_viewer`. The window is built with egui. With several
@@ -33,14 +35,14 @@ When a scene has animation clips or morph targets, an animation panel appears
 below the view:
 - Play/Pause (Space) and Stop.
 - A timeline of the selected clip: click or drag to scrub. Drag the blue
-  triangles to move the loop region.
+  triangles to try another loop region; "Reset loop" goes back to the clip's.
 - One row per clip, with a checkbox to play it and a blend weight slider.
   Several checked clips blend. Click a clip's name to show it on the timeline.
 - A weight slider per morph target.
 
-Playback, clip weights and morph sliders are a preview and don't change the
-scene. Moving a loop handle edits the clip, so the agent sees it and it can be
-undone. The camera frames the rest pose, so it holds still while clips play.
+Playback, clip weights, morph sliders and loop regions are previews and don't
+change the scene. The camera frames the rest pose, so it holds still while
+clips play.
 
 Register it with Claude Code:
 
@@ -126,9 +128,8 @@ The agent manages references with `add_reference`, `update_reference`,
 view and are saved in the project file.
 
 In the viewer:
-- The References panel toggles each image, switches it between Behind and On top, sets its opacity and removes it.
-- "Add reference…" in the toolbar opens a file chooser for the current Front/Right/Top view. Dropping an image file on the window does the same on X11, macOS and Windows; winit doesn't support file drops on Wayland.
-- These changes are undoable edits of the scene, so the agent sees them too.
+- The References panel shows or hides each of the agent's images, switches it between Behind and On top, and sets its opacity. These settings affect only the viewer; "Reset" returns to the agent's.
+- "Add reference…" in the toolbar loads your own image for the current Front/Right/Top view. Dropping an image file on the window does the same on X11, macOS and Windows; winit doesn't support file drops on Wayland. Your images are listed under "Mine": the agent never sees them, and they aren't saved in the project.
 
 ## Conventions the agent sees
 
