@@ -27,7 +27,9 @@ schemars = "1.2.3"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }
 wgpu = "30.0.1"
 winit = "0.30.13"
-softbuffer = "0.4.8"
+egui = { version = "0.37.0", features = ["default_fonts"] }
+egui-wgpu = { version = "0.37.0", default-features = false, features = ["winit"] }
+egui-winit = { version = "0.37.0", default-features = false, features = ["wayland", "x11", "clipboard", "links"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 pollster = "1.0.1"
 faer = "0.24.4"

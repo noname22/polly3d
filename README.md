@@ -21,12 +21,13 @@ cargo build --release
 The live viewer is a read-only window that mirrors every edit. It is not shown
 by default: ask the agent to open it (`show_viewer`) when you want to watch,
 and to close it (`hide_viewer`) when you don't. Closing the window yourself has
-the same effect as `hide_viewer`. With several scenes it opens on an overview
-grid: click a tile to view that scene alone, and use `< Back` (or Backspace/Esc)
-to return. Single-scene controls: left-drag to
-orbit, mouse wheel to zoom, `1`–`4` for the front/right/top/persp views, `W`
-toggles the wireframe, `G` the grid, `S` the selection highlight, `F` cycles the
-texture filter (per-texture / nearest / linear), and `R` resets the camera.
+the same effect as `hide_viewer`. The window is built with egui. With several
+scenes it opens on an overview of thumbnails: click one to view that scene
+alone, and use `< Back` (or Backspace/Esc) to return. In the single-scene view,
+the toolbar switches views, overlays and texture filtering. Left-drag orbits,
+the mouse wheel zooms, and the shortcuts are `1`–`4` (front/right/top/persp),
+`W` (wireframe), `G` (grid), `S` (selection highlight), `F` (cycle texture
+filter) and `R` (reset view).
 
 Register it with Claude Code:
 
@@ -48,7 +49,7 @@ renderer.
 | `polly-render` | wgpu offscreen renderer, ID-labelled overlays, contact sheets, CPU picking, UV layout view |
 | `polly-export` | GLB export (textures embedded, sampler filter preserved), `.polly` project files |
 | `polly-mcp` | MCP tool layer (rmcp) |
-| `polly` | binary: stdio server + optional viewer |
+| `polly` | binary: stdio server + optional egui viewer |
 
 ## Scenes and subagents
 

@@ -34,6 +34,18 @@ pub struct TileCache(Mutex<HashMap<String, (u64, u32, RgbaImage)>>);
 const GAP: u32 = 4;
 const BG: [u8; 4] = [18, 19, 23, 255];
 
+/// How a scene thumbnail is rendered (shared with the viewer's overview).
+pub fn tile_options(size: u32) -> RenderOptions {
+    RenderOptions {
+        view: View::Persp,
+        width: size,
+        height: size,
+        overlays: Overlays { selection: false, ..Overlays::default() },
+        legend: false,
+        ..RenderOptions::default()
+    }
+}
+
 /// Grid geometry for `n` tiles that best fills `width` x `height`.
 /// Returns (columns, tile size).
 pub fn layout(n: usize, width: u32, height: u32) -> (u32, u32) {
@@ -73,15 +85,7 @@ pub fn render_grid(
         let (x, y) = (ox + GAP + c * (tile + GAP), oy + GAP + r * (tile + GAP));
         let fresh = matches!(cache.get(&s.name), Some((v, t, _)) if *v == s.version && *t == tile);
         if !fresh {
-            let opts = RenderOptions {
-                view: View::Persp,
-                width: tile,
-                height: tile,
-                overlays: Overlays { selection: false, ..Overlays::default() },
-                legend: false,
-                ..RenderOptions::default()
-            };
-            let rendered = renderer.render(&s.scene, &opts)?.image;
+            let rendered = renderer.render(&s.scene, &tile_options(tile))?.image;
             cache.insert(s.name.clone(), (s.version, tile, rendered));
         }
         let tile_img = &cache[&s.name].2;

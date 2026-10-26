@@ -97,7 +97,7 @@ fn main() -> Result<()> {
                 }
                 std::process::exit(0);
             });
-            if let Err(e) = viewer::run(el, workspace, services, args.viewer) {
+            if let Err(e) = viewer::run(el, workspace, args.viewer) {
                 tracing::error!("viewer: {e:#}; continuing without it");
             }
             rt.block_on(std::future::pending::<()>());
