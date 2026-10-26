@@ -85,6 +85,16 @@ pub fn edit_mesh(
     crate::tools::view::maybe_preview(ctx, id, out)
 }
 
+/// Symmetric editing options shared by the vertex tools.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+pub struct Symmetry {
+    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
+    #[serde(default)]
+    pub mirror: bool,
+    /// How far (object units) a vertex may be from the exact mirror position and still pair (default: 0.1% of the mesh size).
+    pub mirror_tolerance: Option<f32>,
+}
+
 /// [`edit_mesh`] that optionally makes the edit symmetric across the object's
 /// X = 0 plane: moved vertices' mirror partners follow (see `ops::symmetry`).
 pub fn edit_mesh_mirrored(
@@ -92,15 +102,16 @@ pub fn edit_mesh_mirrored(
     object: &Option<String>,
     ids: Option<&Option<Vec<String>>>,
     label: &str,
-    mirror: bool,
+    mirror: Symmetry,
     f: impl FnOnce(&mut Mesh, &Selection) -> polly_core::Result<Selection>,
 ) -> Result<Out> {
+    let (mirror, tol) = (mirror.mirror, mirror.mirror_tolerance);
     let report = std::cell::RefCell::new(None);
     let mut out = edit_mesh(ctx, object, ids, label, |m, s| {
         let before = mirror.then(|| m.clone());
         let r = f(m, s)?;
         if let Some(b) = before {
-            *report.borrow_mut() = Some(polly_core::ops::symmetry::mirror_edit(&b, m));
+            *report.borrow_mut() = Some(polly_core::ops::symmetry::mirror_edit(&b, m, tol));
         }
         Ok(r)
     })?;
@@ -108,7 +119,7 @@ pub fn edit_mesh_mirrored(
         out.json["mirror"] = json!({"partners_moved": r.mirrored});
         if !r.unpaired.is_empty() {
             out.json["mirror"]["unpaired"] = json!(format!(
-                "{} edited vertices have no mirror partner across x = 0 (their other side didn't follow): {}",
+                "{} edited vertices have no mirror partner across x = 0 (their other side didn't follow; a larger mirror_tolerance may pair them): {}",
                 r.unpaired.len(),
                 polly_core::ids::compress("v", r.unpaired.iter().copied())
             ));

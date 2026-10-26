@@ -65,8 +65,8 @@ pub struct MirrorReport {
 /// edited mesh (same vertex ids). Each moved vertex's partner gets its
 /// mirrored position; when both sides moved, the +X side leads. Vertices that
 /// were on the plane stay on it.
-pub fn mirror_edit(before: &Mesh, after: &mut Mesh) -> MirrorReport {
-    let tol = tolerance(before);
+pub fn mirror_edit(before: &Mesh, after: &mut Mesh, tol: Option<f32>) -> MirrorReport {
+    let tol = tol.unwrap_or_else(|| tolerance(before));
     let pairs = partners(before, tol);
     let moved: Vec<VertId> = after
         .verts
@@ -117,14 +117,14 @@ mod tests {
         let w = pairs[&v];
         let mut after = m.clone();
         after.verts.get_mut(&v).unwrap().pos = p + Vec3::new(0.3, 0.2, 0.0);
-        let r = mirror_edit(&m, &mut after);
+        let r = mirror_edit(&m, &mut after, None);
         assert_eq!(r.mirrored, 1);
         assert!(after.verts[&w].pos.abs_diff_eq(mirror(p + Vec3::new(0.3, 0.2, 0.0)), 1e-6));
         // A vertex on the plane stays on it.
         let (c, cp) = m.verts.iter().find(|(_, v)| v.pos.x.abs() < 1e-6).map(|(i, v)| (*i, v.pos)).unwrap();
         let mut after = m.clone();
         after.verts.get_mut(&c).unwrap().pos = cp + Vec3::new(0.4, 0.1, 0.0);
-        mirror_edit(&m, &mut after);
+        mirror_edit(&m, &mut after, None);
         assert!(after.verts[&c].pos.abs_diff_eq(cp + Vec3::new(0.0, 0.1, 0.0), 1e-6));
     }
 }

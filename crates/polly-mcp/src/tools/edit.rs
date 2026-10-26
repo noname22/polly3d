@@ -101,9 +101,8 @@ struct Move {
     offset: [f32; 3],
     #[serde(flatten)]
     soft: Soft,
-    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
-    #[serde(default)]
-    mirror: bool,
+    #[serde(flatten)]
+    mirror: Symmetry,
 }
 
 /// Soft selection: also move nearby vertices, fading out with distance.
@@ -165,9 +164,8 @@ struct Rotate {
     pivot: Option<Pivot>,
     #[serde(flatten)]
     soft: Soft,
-    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
-    #[serde(default)]
-    mirror: bool,
+    #[serde(flatten)]
+    mirror: Symmetry,
 }
 
 fn rotate(ctx: &mut Ctx, a: Rotate) -> Result<Out> {
@@ -202,9 +200,8 @@ struct Scale {
     pivot: Option<Pivot>,
     #[serde(flatten)]
     soft: Soft,
-    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
-    #[serde(default)]
-    mirror: bool,
+    #[serde(flatten)]
+    mirror: Symmetry,
 }
 
 fn scale(ctx: &mut Ctx, a: Scale) -> Result<Out> {
@@ -233,9 +230,8 @@ struct SetPosition {
     x: Option<f32>,
     y: Option<f32>,
     z: Option<f32>,
-    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
-    #[serde(default)]
-    mirror: bool,
+    #[serde(flatten)]
+    mirror: Symmetry,
 }
 
 fn set_position(ctx: &mut Ctx, a: SetPosition) -> Result<Out> {
@@ -730,9 +726,8 @@ struct Inflate {
     distance: f32,
     /// A plane vertices may not cross (object space).
     keep_plane: Option<PlaneArg>,
-    /// Symmetric edit: each moved vertex's mirror partner across the object's x = 0 plane follows (the +X side leads if both move; vertices on the plane stay on it).
-    #[serde(default)]
-    mirror: bool,
+    #[serde(flatten)]
+    mirror: Symmetry,
 }
 
 fn inflate(ctx: &mut Ctx, a: Inflate) -> Result<Out> {
@@ -798,9 +793,8 @@ struct SetPositions {
     positions: Option<std::collections::BTreeMap<String, [f32; 3]>>,
     /// A JSON file with such a map, or export_mesh output (vertex_ids + vertices).
     path: Option<String>,
-    /// Mirror partners across x = 0 follow.
-    #[serde(default)]
-    mirror: bool,
+    #[serde(flatten)]
+    mirror: Symmetry,
 }
 
 fn set_positions(ctx: &mut Ctx, a: SetPositions) -> Result<Out> {
@@ -845,8 +839,8 @@ struct PushOut {
     target: String,
     /// Distance to keep from the target's surface (default 0.005).
     clearance: Option<f32>,
-    #[serde(default)]
-    mirror: bool,
+    #[serde(flatten)]
+    mirror: Symmetry,
 }
 
 fn push_out(ctx: &mut Ctx, a: PushOut) -> Result<Out> {
@@ -867,6 +861,17 @@ fn push_out(ctx: &mut Ctx, a: PushOut) -> Result<Out> {
         Ok(Selection { verts: moved.into_iter().collect(), ..Default::default() })
     })?;
     out.json["pushed"] = json!(n);
+    // Faces can still cross with every vertex outside: say so instead of looking done.
+    let me = polly_core::bvh::Bvh::new(&ctx.doc.scene.object(id)?.mesh, polly_core::glam::Mat4::IDENTITY);
+    let left = polly_core::ops::collide::intersections(&me, &bvh);
+    if !left.is_empty() {
+        let faces: BTreeSet<u32> = left.iter().map(|h| h.0).collect();
+        out.json["still_crossing"] = json!({
+            "crossings": left.len(),
+            "faces": polly_core::ids::compress("f", faces),
+            "hint": "these faces cross the target between vertices that are outside it (large faces, or a sheet passing all the way through): subdivide them (intersections with select: true, then subdivide) and push_out again, or move that part clear by hand",
+        });
+    }
     Ok(out)
 }
 

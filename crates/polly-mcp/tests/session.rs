@@ -1424,3 +1424,34 @@ fn loft_bridge_and_collisions() {
     // The torso and the hair are far apart.
     assert_eq!(call(&s, "intersections", json!({"object": "Figure"}))["result"], "no crossings");
 }
+
+/// Follow-ups from the agent run: push_out hint, select without undo,
+/// mirror tolerance, compare picture size.
+#[test]
+fn agent_followups() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "uv_sphere", "radius": 0.5, "segments": 12, "rings": 8}, "name": "Head"}));
+    // A coarse slab through the head: every vertex outside, faces crossing.
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.9, 0.3, 0.9]}, "name": "Slab", "position": [0, 0.4, 0]}));
+    let r = call(&s, "push_out", json!({"object": "Slab", "target": "Head", "clearance": 0.01}));
+    assert_eq!(r["pushed"], 0, "{r}");
+    assert!(r["still_crossing"]["crossings"].as_u64().unwrap() > 0, "{r}");
+
+    // intersections select: like select, not an undo step.
+    let undo_steps = |s: &polly_mcp::PollyServer| call(s, "history", json!({})).to_string();
+    let before = undo_steps(&s);
+    call(&s, "intersections", json!({"object": "Slab", "select": true}));
+    assert_eq!(undo_steps(&s), before);
+
+    // Mirror tolerance: a vertex 1 cm off its mirror position pairs only with a larger tolerance.
+    call(&s, "add_mesh", json!({"name": "Strip", "vertices": [[0.5, 0, 0], [-0.51, 0, 0], [0.5, 1, 0], [-0.5, 1, 0]], "faces": [[0, 2, 3, 1]]}));
+    let ids: Vec<String> = {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        g.doc.scene.objects.values().find(|o| o.name == "Strip").unwrap().mesh.verts.keys().map(|v| format!("v{v}")).collect()
+    };
+    let r = call(&s, "move", json!({"object": "Strip", "elements": [ids[0].clone()], "offset": [0.1, 0, 0], "mirror": true}));
+    assert!(r["mirror"]["unpaired"].is_string(), "{r}");
+    let r = call(&s, "move", json!({"object": "Strip", "elements": [ids[0].clone()], "offset": [0.1, 0, 0], "mirror": true, "mirror_tolerance": 0.2}));
+    assert_eq!(r["mirror"]["partners_moved"], 1, "{r}");
+}

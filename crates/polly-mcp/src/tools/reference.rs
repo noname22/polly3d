@@ -342,6 +342,8 @@ struct CompareRef {
     heights: Option<Vec<f32>>,
     /// Colour distance from the background that counts as drawing (default 60).
     threshold: Option<f32>,
+    /// Longest side of the diff picture in pixels (default 768, at most the crop's size x 2).
+    size: Option<u32>,
 }
 
 fn compare_reference(ctx: &mut Ctx, a: CompareRef) -> Result<Out> {
@@ -407,7 +409,7 @@ fn compare_reference(ctx: &mut Ctx, a: CompareRef) -> Result<Out> {
         .collect();
     // Picture over the crop: reference faded, red = model only, blue = drawing only.
     let [x0, y0, w, h] = r.rect();
-    let k = (384.0 / h.max(w) as f32).min(1.0);
+    let k = (a.size.unwrap_or(768).clamp(64, 2048) as f32 / h.max(w) as f32).min(2.0);
     let (iw, ih) = (((w as f32 * k).round() as u32).max(1), ((h as f32 * k).round() as u32).max(1));
     let mut img = image::RgbaImage::new(iw, ih);
     for iy in 0..ih {

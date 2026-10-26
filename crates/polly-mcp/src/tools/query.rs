@@ -359,11 +359,9 @@ fn intersections(ctx: &mut Ctx, a: Intersections) -> Result<Out> {
     }
     let name = shown.objects[&id].name.clone();
     if a.select && !mine.is_empty() {
-        let sel = polly_core::ids::Selection { faces: mine.clone(), ..Default::default() };
-        ctx.doc.edit("select intersections", |sc| {
-            sc.object_mut(id)?.selection = sel;
-            Ok(())
-        })?;
+        // Like select: changes the selection without an undo step.
+        ctx.doc.scene.object_mut(id)?.selection = polly_core::ids::Selection { faces: mine.clone(), ..Default::default() };
+        ctx.doc.touch();
     }
     Ok(Out::json(if rows.is_empty() {
         json!({"object": name, "intersections": [], "result": "no crossings"})
