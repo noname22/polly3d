@@ -664,3 +664,61 @@ fn fitting_gear() {
     assert!((p - polly_core::glam::Vec3::new(0.0, 1.3, 0.0)).length() < 1e-3, "sword exported at {p}");
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Phase 3 of gear support: slots, variants and hide rules.
+#[test]
+fn slots_and_variants() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.6, 1.0, 0.4]}, "name": "Body"}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.4, 0.2, 0.4]}, "name": "HairShort", "position": [0, 0.7, 0]}));
+    call(&s, "select", json!({"object": "HairShort", "query": {"by": "normal", "direction": [0, 1, 0]}}));
+    call(&s, "set_part", json!({"object": "HairShort", "name": "hair_top"}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.45, 0.6, 0.45]}, "name": "HairLong", "position": [0, 0.5, 0]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "radius_bottom": 0.3, "radius_top": 0.0, "height": 0.4}, "name": "Helmet", "position": [0, 0.95, 0]}));
+
+    let r = call(&s, "add_variant", json!({"slot": "hair", "variant": "short", "objects": ["HairShort"]}));
+    assert_eq!(r["note"], "created slot 'hair'", "{r}");
+    call(&s, "add_variant", json!({"slot": "hair", "variant": "long", "objects": ["HairLong"]}));
+    call(&s, "add_variant", json!({"slot": "head", "variant": "none"}));
+    call(&s, "add_variant", json!({"slot": "head", "variant": "helmet", "objects": ["Helmet"], "hides": [{"object": "HairShort", "part": "hair_top"}]}));
+    let slots = call(&s, "list_slots", json!({}));
+    assert_eq!(slots["slots"][0]["default"], "short");
+    assert_eq!(slots["slots"][1]["variants"][1]["hides"][0]["part"], "hair_top");
+
+    // mistakes are explained
+    let e = call_err(&s, "add_variant", json!({"slot": "head", "variant": "wig", "objects": ["HairLong"]}));
+    assert!(e.contains("already belongs to slot 'hair'"), "{e}");
+    let e = call_err(&s, "add_variant", json!({"slot": "head", "variant": "cap", "hides": [{"object": "Body", "part": "scalp"}]}));
+    assert!(e.contains("no part 'scalp'"), "{e}");
+    let e = call_err(&s, "render", json!({"variants": {"hair": "mohawk"}}));
+    assert!(e.contains("mohawk") && e.contains("short"), "{e}");
+
+    // what is shown follows the active variants and hide rules
+    let shown = |s: &PollyServer, choice: serde_json::Value| -> std::collections::BTreeMap<String, usize> {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let c: std::collections::BTreeMap<String, String> = serde_json::from_value(choice).unwrap();
+        let v = polly_core::variants::variant_view(&g.doc.scene, &c);
+        v.objects.values().filter(|o| o.visible).map(|o| (o.name.clone(), o.mesh.faces.len())).collect()
+    };
+    assert_eq!(shown(&s, json!({})), [("Body".into(), 6), ("HairShort".into(), 6)].into());
+    assert_eq!(shown(&s, json!({"head": "helmet"})), [("Body".into(), 6), ("HairShort".into(), 5), ("Helmet".into(), 9)].into());
+    call(&s, "set_variant", json!({"slot": "hair", "variant": "long"}));
+    assert!(shown(&s, json!({})).contains_key("HairLong"));
+    call(&s, "set_default_variant", json!({"slot": "head", "variant": "helmet"}));
+    assert_eq!(call(&s, "describe_scene", json!({}))["slots"]["head"]["default"], "helmet");
+
+    // renders and picks use the chosen variants
+    let r = s.call("render", json!({"view": "front", "variants": {"head": "helmet", "hair": "short"}}));
+    if r.is_error != Some(true) {
+        let hit = call(&s, "pick", json!({"x": 256, "y": 120}));
+        assert_eq!(hit["object"], "Helmet", "{hit}");
+        let v = s.call("render_variants", json!({"slot": "hair", "variants": {"head": "none"}, "view": "front"}));
+        assert_ne!(v.is_error, Some(true), "{}", text(&v));
+        std::fs::write(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("variants.png"), &images(&v)[0]).unwrap();
+    }
+    // deleting an object takes it out of its variant
+    call(&s, "delete_object", json!({"object": "HairLong"}));
+    let slots = call(&s, "list_slots", json!({}));
+    assert_eq!(slots["slots"][0]["variants"][1]["objects"], json!([]), "{slots}");
+}

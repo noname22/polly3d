@@ -168,6 +168,9 @@ pub struct Scene {
     pub background: [f32; 4],
     #[serde(default)]
     pub clips: BTreeMap<crate::anim::ClipId, crate::anim::Clip>,
+    /// Swappable gear: slot name -> variants (see `variants`).
+    #[serde(default)]
+    pub slots: BTreeMap<String, crate::variants::Slot>,
     #[serde(default)]
     next_clip: crate::anim::ClipId,
     next_object: ObjectId,
@@ -191,6 +194,7 @@ impl Default for Scene {
             active: None,
             background: default_bg(),
             clips: BTreeMap::new(),
+            slots: BTreeMap::new(),
             next_clip: 1,
             next_object: 1,
             next_material: 1,
@@ -282,6 +286,7 @@ impl Scene {
         if self.active == Some(id) {
             self.active = self.objects.keys().next().copied();
         }
+        self.drop_from_slots(id);
         Ok(o)
     }
 

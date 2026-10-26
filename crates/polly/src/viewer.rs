@@ -105,6 +105,8 @@ enum Mode {
 struct ViewState {
     /// Animation playback per scene name.
     anim: HashMap<String, AnimState>,
+    /// Variant previews per scene name (slot -> variant), overriding the scene's active ones.
+    variants: HashMap<String, std::collections::BTreeMap<String, String>>,
     mode: Mode,
     cam: Cam,
     zoom: f32,
@@ -331,6 +333,13 @@ fn build_ui(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, workspace: &
             return Ok(true);
         };
         if let Some(snap) = snaps.into_iter().next() {
+            // Gear variants: preview choices in a side panel (not saved to the scene).
+            let choice = view.variants.entry(name.clone()).or_default();
+            choice.retain(|slot, v| snap.scene.slots.get(slot).is_some_and(|s| s.variants.iter().any(|x| &x.name == v)));
+            if !snap.scene.slots.is_empty() {
+                egui::Panel::right("variants").show(ui, |ui| variants_panel(ui, &snap.scene, choice));
+            }
+            let chosen = polly_core::variants::variant_view(&snap.scene, choice);
             let st = view.anim.entry(name.clone()).or_default();
             let dt = ui.input(|i| i.stable_dt).min(0.1);
             st.advance(&snap.scene, dt);
@@ -352,8 +361,8 @@ fn build_ui(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, workspace: &
                 ui.ctx().request_repaint();
             }
             // Frame the rest pose so the camera holds still during playback.
-            rest_bounds = snap.scene.bounds().map(|(lo, hi)| [lo.to_array(), hi.to_array()]);
-            shown = Some(st.display(&snap.scene));
+            rest_bounds = chosen.bounds().map(|(lo, hi)| [lo.to_array(), hi.to_array()]);
+            shown = Some(st.display(&chosen));
         }
     }
     let mut complete = true;
@@ -366,6 +375,29 @@ fn build_ui(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, workspace: &
     })
     .inner?;
     Ok(complete)
+}
+
+/// One dropdown per gear slot; choices are previews layered over the scene's active variants.
+fn variants_panel(ui: &mut egui::Ui, scene: &Scene, choice: &mut std::collections::BTreeMap<String, String>) {
+    ui.add_space(4.0);
+    ui.strong("Variants");
+    ui.add_space(4.0);
+    for (slot, s) in &scene.slots {
+        let current = choice.get(slot).cloned().unwrap_or_else(|| s.active.clone());
+        ui.label(slot);
+        egui::ComboBox::from_id_salt(("variant", slot)).selected_text(&current).show_ui(ui, |ui| {
+            for v in &s.variants {
+                let label = if v.name == s.default { format!("{} (default)", v.name) } else { v.name.clone() };
+                if ui.selectable_label(current == v.name, label).clicked() {
+                    choice.insert(slot.clone(), v.name.clone());
+                }
+            }
+        });
+        ui.add_space(4.0);
+    }
+    if !choice.is_empty() && ui.small_button("reset").on_hover_text("back to the scene's active variants").clicked() {
+        choice.clear();
+    }
 }
 
 /// Store a loop region dragged in the timeline as an undoable edit of the clip.
@@ -518,7 +550,7 @@ fn refresh_thumb(ctx: &egui::Context, gpu: &mut Gpu, s: &Snapshot, size: u32) ->
     if matches!(gpu.thumbs.get(&s.name), Some((v, sz, _)) if *v == s.version && *sz == size) {
         return Ok(());
     }
-    let img = gpu.scene.render(&polly_core::anim::pose_scene(&s.scene, &[]), &tile_options(size))?.image;
+    let img = gpu.scene.render(&polly_core::variants::display(&s.scene, &[], &Default::default()), &tile_options(size))?.image;
     let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
     let tex = ctx.load_texture(format!("thumb:{}", s.name), color, egui::TextureOptions::LINEAR);
     gpu.thumbs.insert(s.name.clone(), (s.version, size, tex));
@@ -686,7 +718,7 @@ pub fn run(el: EventLoop<ViewerCommand>, workspace: Arc<Workspace>, start_open: 
         instance,
         gfx: None,
         start_open,
-        view: ViewState { anim: HashMap::new(), mode: Mode::Overview, cam: Cam::Persp, zoom: 1.0, overlays: Overlays::default(), filter: None },
+        view: ViewState { anim: HashMap::new(), variants: HashMap::new(), mode: Mode::Overview, cam: Cam::Persp, zoom: 1.0, overlays: Overlays::default(), filter: None },
         seen: None,
         error: None,
     };

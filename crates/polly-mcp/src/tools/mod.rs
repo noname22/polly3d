@@ -8,6 +8,7 @@ pub mod query;
 pub mod scene;
 pub mod scenes;
 pub mod uv;
+pub mod variants;
 pub mod view;
 
 use crate::registry::Registry;
@@ -21,6 +22,7 @@ pub fn registry() -> Registry {
     tools.extend(history::tools());
     tools.extend(view::tools());
     tools.extend(anim::tools());
+    tools.extend(variants::tools());
     tools.extend(uv::tools());
     tools.extend(paint::tools());
     tools.extend(io::tools());

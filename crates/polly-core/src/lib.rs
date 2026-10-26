@@ -9,6 +9,7 @@ pub mod ops;
 pub mod primitives;
 pub mod scene;
 pub mod select;
+pub mod variants;
 
 pub use error::{Error, Result};
 pub use glam;

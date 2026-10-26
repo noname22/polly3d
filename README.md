@@ -99,6 +99,17 @@ to a bone (`attach_to_bone`) and follows it; fitted gear gets the body's
 weights with `transfer_weights`. Shared-armature skins
 are not exported to GLB yet; `export_glb` warns about such meshes.
 
+## Gear slots and variants
+
+Swappable gear is organised in slots (`hair`, `head`, `weapon`...), each with
+variants: sets of objects, possibly empty (`none`). One variant per slot is
+active in Polly, and one is the default, meant to be visible when the
+exported model is loaded. A variant can hide named parts of other objects
+while active, such as a helmet hiding `hair_top`, to avoid poke-through.
+Renders accept a variant choice, `render_variants` shows all options of a
+slot, and the viewer has a dropdown per slot (a preview that doesn't change
+the scene). Exporting the variants for runtime swapping is not done yet.
+
 ## Conventions the agent sees
 
 - Y up, right-handed. The "front" view looks from +Z.

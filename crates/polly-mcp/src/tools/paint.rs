@@ -621,7 +621,7 @@ fn bake_shading(ctx: &mut Ctx, a: BakeShading) -> Result<Out> {
     if a.shading.ao.is_none() && a.shading.height.is_none() {
         bail!("give ao (e.g. {{\"ao\":{{}}}}) and/or height (e.g. {{\"height\":{{}}}})");
     }
-    let shown = polly_core::anim::pose_scene(&ctx.doc.scene, &[]);
+    let shown = polly_core::variants::display(&ctx.doc.scene, &[], &Default::default());
     let s = &ctx.doc.scene;
     let id = resolve(s, &a.object)?;
     let mesh = shown.objects[&id].mesh.clone();

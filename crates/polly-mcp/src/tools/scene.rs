@@ -137,6 +137,9 @@ pub fn object_summary(scene: &Scene, id: u32) -> serde_json::Value {
     if let Some(b) = o.skin {
         j["skinned_to"] = json!(scene.objects.get(&b.armature).map(|a| a.name.clone()));
     }
+    if let Some((slot, variant)) = scene.variant_of(id) {
+        j["variant"] = json!(format!("{slot}: {variant}"));
+    }
     if let (Some(b), Some(p)) = (o.parent_bone, o.parent.and_then(|p| scene.objects.get(&p))) {
         j["attached_to"] = json!(format!("{} / {}", p.name, p.skeleton.as_ref().map_or("?", |sk| sk.name(b))));
     }
@@ -174,6 +177,9 @@ fn describe_scene(ctx: &mut Ctx, _: Empty) -> Result<Out> {
     });
     if let Some((lo, hi)) = s.bounds() {
         j["scene_bounds"] = json!({"min": round3(lo), "max": round3(hi)});
+    }
+    if !s.slots.is_empty() {
+        j["slots"] = json!(s.slots.iter().map(|(k, v)| (k.clone(), json!({"active": v.active, "default": v.default, "variants": v.variants.iter().map(|x| x.name.clone()).collect::<Vec<_>>()}))).collect::<serde_json::Map<_, _>>());
     }
     if !s.palettes.is_empty() {
         j["palettes"] = json!(s.palettes.iter().map(|(k, v)| (k.clone(), v.len())).collect::<std::collections::BTreeMap<_, _>>());

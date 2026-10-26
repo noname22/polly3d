@@ -20,6 +20,8 @@ pub struct LastView {
     pub tiles: Vec<Tile>,
     /// Clips the render was posed with, so picks hit the same geometry.
     pub plays: Vec<polly_core::anim::ClipPlay>,
+    /// Variant choices the render used (slot -> variant).
+    pub variants: std::collections::BTreeMap<String, String>,
 }
 
 /// Requests to the live viewer window. Each carries a channel for the outcome.

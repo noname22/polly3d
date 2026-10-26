@@ -1138,6 +1138,8 @@ struct RenderAnim {
     focus: Option<Vec<String>>,
     /// Default: wireframe and grid, no selection highlight.
     overlays: Option<polly_render::Overlays>,
+    /// Variants to show instead of the active ones, e.g. {"hair": "braids"}.
+    variants: Option<BTreeMap<String, String>>,
 }
 
 fn render_animation(ctx: &mut Ctx, a: RenderAnim) -> Result<Out> {
@@ -1154,6 +1156,7 @@ fn render_animation(ctx: &mut Ctx, a: RenderAnim) -> Result<Out> {
         }
     };
     let tile = a.tile_size.unwrap_or(256).clamp(96, 512);
+    let choice = super::variants::choice(s, &a.variants)?;
     let focus = a
         .focus
         .as_ref()
@@ -1176,7 +1179,7 @@ fn render_animation(ctx: &mut Ctx, a: RenderAnim) -> Result<Out> {
     let mut renderer = ctx.services.renderer()?;
     for (i, f) in frames.iter().enumerate() {
         let args: Vec<PlayArg> = a.clips.iter().map(|p| PlayArg { frame: *f, ..p.clone() }).collect();
-        let posed = anim::pose_scene(s, &plays(s, &args)?);
+        let posed = polly_core::variants::display(s, &plays(s, &args)?, &choice);
         let tile_img = renderer.render(&posed, &opts)?.image;
         let (x, y) = (gap + (i as u32 % cols) * (tile + gap), gap + (i as u32 / cols) * (tile + gap));
         image::imageops::overlay(&mut img, &tile_img, x as i64, y as i64);
