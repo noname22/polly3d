@@ -29,6 +29,12 @@ pub fn tools() -> Vec<ToolDef> {
             add_primitive,
         ),
         def(
+            "loft",
+            "Create a tube through cross-sections: each section is a closed loop of points (any number per section; different counts are joined with evenly spread triangles), in order along the tube, e.g. a limb or torso from rings measured off a reference. caps closes both ends. Faces point outward.",
+            false,
+            loft,
+        ),
+        def(
             "replace_geometry",
             "Swap an object's mesh for new geometry (a .obj/.json file or inline data) while keeping the object: name, transform, parent, materials, gear slots, rig binding and attached children. If the new mesh has the same vertices and face loops in the same order (e.g. edited export_mesh output), only positions (and given uvs/parts) change and all ids, weights and morphs are kept; otherwise skin weights are transferred from the old mesh. Use it to rebuild a mesh from a script instead of delete + add.",
             false,
@@ -340,6 +346,24 @@ fn delete_object(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
         j["note"] = json!(format!("it was removed from slot '{slot}' (variant {vs}); to rebuild a mesh in place, use replace_geometry instead"));
     }
     Ok(Out::json(j))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Loft {
+    name: String,
+    /// Closed loops of [x, y, z] points (object space), in order along the tube.
+    sections: Vec<Vec<[f32; 3]>>,
+    /// Close both ends with a face (default false: open ends, ready to bridge).
+    #[serde(default)]
+    caps: bool,
+    position: Option<[f32; 3]>,
+    parent: Option<String>,
+}
+
+fn loft(ctx: &mut Ctx, a: Loft) -> Result<Out> {
+    let sections: Vec<Vec<Vec3>> = a.sections.iter().map(|s| s.iter().map(|p| Vec3::from_array(*p)).collect()).collect();
+    let m = polly_core::ops::loft::loft(&sections, a.caps)?;
+    add_object(ctx, &a.name, m, a.position, None, None, &a.parent)
 }
 
 #[derive(Deserialize, JsonSchema)]

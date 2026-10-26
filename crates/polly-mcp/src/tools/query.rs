@@ -14,6 +14,12 @@ use crate::registry::{Ctx, Out, ToolDef, def};
 pub fn tools() -> Vec<ToolDef> {
     vec![
         def(
+            "intersections",
+            "Find where an object's surface crosses other objects (as shown: active variants, static pose): per object, the crossing count, this object's and their faces, and the world-space region. Catches arms through hair or a sword through a leg before they show in a render. select: true selects the crossing faces.",
+            false,
+            intersections,
+        ),
+        def(
             "describe_mesh",
             "Summary of one object's mesh: counts, local bounds, face sizes (tris/quads/ngons), materials used, seams/sharp counts, current selection and topology warnings.",
             true,
@@ -309,4 +315,59 @@ fn measure(ctx: &mut Ctx, a: MeasureArgs) -> Result<Out> {
         "face_area": area,
         "edge_length": edge_len,
     })))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Intersections {
+    object: Option<String>,
+    /// Objects to test against (default: every other shown object).
+    with: Option<Vec<String>>,
+    /// Select this object's crossing faces.
+    #[serde(default)]
+    select: bool,
+}
+
+fn intersections(ctx: &mut Ctx, a: Intersections) -> Result<Out> {
+    use polly_core::bvh::Bvh;
+    let s = &ctx.doc.scene;
+    let id = resolve(s, &a.object)?;
+    // As shown: active variants, static pose.
+    let shown = polly_core::variants::display(s, &[], &Default::default());
+    let others: Vec<u32> = match &a.with {
+        Some(ns) => ns.iter().map(|n| s.resolve(Some(n))).collect::<polly_core::Result<_>>()?,
+        None => shown.objects.iter().filter(|(o, ob)| **o != id && ob.visible && !ob.mesh.faces.is_empty()).map(|(o, _)| *o).collect(),
+    };
+    let me = Bvh::new(&shown.objects[&id].mesh, shown.world_matrix(id));
+    let mut mine = std::collections::BTreeSet::new();
+    let mut rows = Vec::new();
+    for o in others {
+        let hits = polly_core::ops::collide::intersections(&me, &Bvh::new(&shown.objects[&o].mesh, shown.world_matrix(o)));
+        if hits.is_empty() {
+            continue;
+        }
+        let (lo, hi) = hits.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), h| (lo.min(h.2), hi.max(h.2)));
+        let a_faces: std::collections::BTreeSet<u32> = hits.iter().map(|h| h.0).collect();
+        let b_faces: std::collections::BTreeSet<u32> = hits.iter().map(|h| h.1).collect();
+        mine.extend(a_faces.iter().copied());
+        rows.push(json!({
+            "with": shown.objects[&o].name,
+            "crossings": hits.len(),
+            "faces": polly_core::ids::compress("f", a_faces),
+            "their_faces": polly_core::ids::compress("f", b_faces),
+            "region": [round3(lo), round3(hi)],
+        }));
+    }
+    let name = shown.objects[&id].name.clone();
+    if a.select && !mine.is_empty() {
+        let sel = polly_core::ids::Selection { faces: mine.clone(), ..Default::default() };
+        ctx.doc.edit("select intersections", |sc| {
+            sc.object_mut(id)?.selection = sel;
+            Ok(())
+        })?;
+    }
+    Ok(Out::json(if rows.is_empty() {
+        json!({"object": name, "intersections": [], "result": "no crossings"})
+    } else {
+        json!({"object": name, "intersections": rows, "hint": "push_out or move the faces apart; world-space region boxes show where"})
+    }))
 }

@@ -43,6 +43,8 @@ Workflow that works well
 3. Refine with select (by normal / box / loops / part) + extrude, inset, bevel, loop_cut, move/scale. Render again after each meaningful change.
    - Organic shaping: move/rotate/scale with `falloff` (soft selection; `connected: true` to leave nearby separate parts alone).
    - Single-sided sheets (hair, cloth, leaves): solidify to give them thickness.
+   - Tubes from cross-sections (torso, limbs): loft through rings of points (sizes may differ); join tubes with bridge_loops (border edges or vertex lists; different counts are fine; closed: false bridges half-rings for branches like hips -> legs).
+   - Poke-through: intersections lists where an object crosses others; push_out moves vertices that sink into a target back out (by a clearance).
    - Symmetric parts: build one side, then mirror_object for the other (names swap .L/.R), or mirror for a symmetric single mesh.
    - Scripted geometry: compute it in a script and pass a file (add_mesh `path`, .obj or .json) instead of pasting numbers; export_mesh writes any object (with vertex/face ids) for scripts to read. Both avoid list_* row limits. To rebuild an existing object, use replace_geometry (keeps its name, materials, slots and rig; same vertex layout keeps all ids), not delete + add.
    - Many exact positions at once: set_positions (a map of ids, or a file). Symmetric models: move/rotate/scale/set_position/set_positions/inflate take `mirror: true`, so the partner vertex across x = 0 follows.

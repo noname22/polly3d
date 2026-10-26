@@ -1379,3 +1379,48 @@ fn editing_batch() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Shape tools: loft, bridge_loops (different sizes), intersections, push_out.
+#[test]
+fn loft_bridge_and_collisions() {
+    let s = server();
+    let ring = |n: usize, r: f32, y: f32| -> Vec<[f32; 3]> {
+        (0..n).map(|i| {
+            let t = i as f32 / n as f32 * std::f32::consts::TAU;
+            [r * t.cos(), y, r * t.sin()]
+        }).collect()
+    };
+    // A torso tube (8 around) and a neck tube (5 around), joined.
+    let r = call(&s, "loft", json!({"name": "Torso", "sections": [ring(8, 0.4, 0.0), ring(8, 0.45, 0.5), ring(8, 0.35, 1.0)]}));
+    assert_eq!(r["faces"], 16, "{r}");
+    call(&s, "loft", json!({"name": "Neck", "sections": [ring(5, 0.12, 1.2), ring(5, 0.11, 1.4)]}));
+    call(&s, "join_objects", json!({"objects": ["Torso", "Neck"]}));
+    call(&s, "rename_object", json!({"object": "Torso", "name": "Figure"}));
+    let border_edge = |y: f32| {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let m = &g.doc.scene.objects.values().find(|o| o.name == "Figure").unwrap().mesh;
+        let ef = m.edge_faces();
+        let e = ef.iter().find(|(e, f)| f.len() == 1 && (m.verts[&e.0].pos.y - y).abs() < 1e-4 && (m.verts[&e.1].pos.y - y).abs() < 1e-4).unwrap().0;
+        format!("e{}-{}", e.0, e.1)
+    };
+    let r = call(&s, "bridge_loops", json!({"object": "Figure", "a": [border_edge(1.0)], "b": [border_edge(1.2)]}));
+    assert_eq!(r["result"]["counts"]["faces"], 13, "8 + 5 triangles: {r}");
+    assert!(r.get("warnings").is_none(), "consistent winding, no new problems: {r}");
+    call_err(&s, "bridge_loops", json!({"object": "Figure", "a": ["v1", "v2"], "b": ["v3", "v4", "v5"]}));
+
+    // Hair poking into a head.
+    call(&s, "add_primitive", json!({"shape": {"kind": "uv_sphere", "radius": 0.5, "segments": 12, "rings": 8}, "name": "Head", "position": [3, 1, 0]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "uv_sphere", "radius": 0.5, "segments": 12, "rings": 8}, "name": "Hair", "position": [3, 1.08, 0]}));
+    let r = call(&s, "intersections", json!({"object": "Hair", "select": true}));
+    let hit = &r["intersections"][0];
+    assert_eq!(hit["with"], "Head", "{r}");
+    assert!(hit["crossings"].as_u64().unwrap() > 0);
+    // Clearance above the faces' sag between pushed vertices (edges ~0.26 on r = 0.5).
+    let r = call(&s, "push_out", json!({"object": "Hair", "target": "Head", "clearance": 0.04}));
+    assert!(r["pushed"].as_u64().unwrap() >= 4, "{r}");
+    let r = call(&s, "intersections", json!({"object": "Hair", "with": ["Head"]}));
+    assert_eq!(r["result"], "no crossings", "{r}");
+    // The torso and the hair are far apart.
+    assert_eq!(call(&s, "intersections", json!({"object": "Figure"}))["result"], "no crossings");
+}

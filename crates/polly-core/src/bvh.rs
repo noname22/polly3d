@@ -109,6 +109,34 @@ impl Bvh {
         false
     }
 
+    /// Indices of triangles whose bounds overlap the box [lo, hi].
+    pub fn overlapping(&self, lo: Vec3, hi: Vec3) -> Vec<usize> {
+        let mut out = Vec::new();
+        if self.nodes.is_empty() {
+            return out;
+        }
+        let mut stack = vec![0usize];
+        while let Some(i) = stack.pop() {
+            let n = self.nodes[i];
+            if n.lo.cmpgt(hi).any() || n.hi.cmplt(lo).any() {
+                continue;
+            }
+            if n.count > 0 {
+                for k in n.start..n.start + n.count {
+                    let p = self.tris[k].p;
+                    let (tlo, thi) = (p[0].min(p[1]).min(p[2]), p[0].max(p[1]).max(p[2]));
+                    if !(tlo.cmpgt(hi).any() || thi.cmplt(lo).any()) {
+                        out.push(k);
+                    }
+                }
+            } else {
+                stack.push(n.start);
+                stack.push(n.start + 1);
+            }
+        }
+        out
+    }
+
     /// Nearest point on the surface to `p`: (triangle index, point, barycentric, distance).
     pub fn closest_point(&self, p: Vec3) -> Option<(usize, Vec3, Vec3, f32)> {
         if self.nodes.is_empty() {
@@ -148,7 +176,7 @@ fn ray_box(o: Vec3, inv: Vec3, lo: Vec3, hi: Vec3, tmax: f32) -> bool {
 }
 
 /// Möller–Trumbore; returns the distance along the ray (two-sided).
-fn ray_tri(o: Vec3, d: Vec3, t: &Tri) -> Option<f32> {
+pub(crate) fn ray_tri(o: Vec3, d: Vec3, t: &Tri) -> Option<f32> {
     let (e1, e2) = (t.p[1] - t.p[0], t.p[2] - t.p[0]);
     let h = d.cross(e2);
     let a = e1.dot(h);

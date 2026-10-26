@@ -47,6 +47,18 @@ pub fn tools() -> Vec<ToolDef> {
             false,
             set_positions,
         ),
+        def(
+            "push_out",
+            "Push vertices out of another object: those inside `target` or closer than `clearance` to its outside move to `clearance` outside it, along its surface normal. For hair, cloth and gear that pokes slightly into the body (vertices deep inside leave by the nearest side, which may not be the one you want). The target should be closed and face outward. It moves vertices: a big face can still cut through between them, so use a clearance above that sag (or subdivide) and check with intersections. `elements` limits which vertices may move (default all); `mirror` keeps the edit symmetric.",
+            false,
+            push_out,
+        ),
+        def(
+            "bridge_loops",
+            "Join two vertex loops with a band of faces, even with different vertex counts (quads when equal, evenly spread triangles otherwise). Give each loop as vertex ids in order, or as one edge of an open border (the whole border loop is used). Loops are aligned automatically. closed: false joins two open chains as a strip (e.g. half of a hip ring to half of a leg ring, for branching). The new faces become the selection.",
+            false,
+            bridge_loops,
+        ),
         def("set_position", "Set absolute coordinates of elements' vertices; omitted axes are unchanged (e.g. flatten to y=0).", false, set_position),
         def("snap", "Snap vertex positions to a grid step.", false, snap),
         def(
@@ -822,5 +834,76 @@ fn set_positions(ctx: &mut Ctx, a: SetPositions) -> Result<Out> {
             }
         }
         Ok(Selection { verts: targets.iter().map(|(i, _)| *i).collect(), ..Default::default() })
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct PushOut {
+    object: Option<String>,
+    elements: Option<Vec<String>>,
+    /// The object to stay outside of.
+    target: String,
+    /// Distance to keep from the target's surface (default 0.005).
+    clearance: Option<f32>,
+    #[serde(default)]
+    mirror: bool,
+}
+
+fn push_out(ctx: &mut Ctx, a: PushOut) -> Result<Out> {
+    let s = &ctx.doc.scene;
+    let id = resolve(s, &a.object)?;
+    let target = s.resolve(Some(&a.target))?;
+    if target == id {
+        anyhow::bail!("an object can't push out of itself");
+    }
+    // The target in this object's space (rest geometry).
+    let bvh = polly_core::bvh::Bvh::new(&s.object(target)?.mesh, s.world_matrix(id).inverse() * s.world_matrix(target));
+    let clearance = a.clearance.unwrap_or(0.005);
+    let ids = a.elements.clone().or(Some(vec!["all".into()]));
+    let mut n = 0;
+    let mut out = edit_mesh_mirrored(ctx, &a.object, Some(&ids), "push out", a.mirror, |m, s| {
+        let moved = polly_core::ops::collide::push_out(m, &s.touched_verts(m), &bvh, clearance);
+        n = moved.len();
+        Ok(Selection { verts: moved.into_iter().collect(), ..Default::default() })
+    })?;
+    out.json["pushed"] = json!(n);
+    Ok(out)
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct BridgeLoops {
+    object: Option<String>,
+    /// First loop: vertex ids in order, or one border edge ["e3-9"].
+    a: Vec<String>,
+    /// Second loop, the same way.
+    b: Vec<String>,
+    /// Loops (default) or open chains.
+    #[serde(default = "yes_closed")]
+    closed: bool,
+}
+
+fn yes_closed() -> bool {
+    true
+}
+
+fn loop_arg(m: &polly_core::mesh::Mesh, ids: &[String]) -> polly_core::Result<Vec<u32>> {
+    if let [one] = ids
+        && let Ok(polly_core::ids::Element::Edge(e)) = polly_core::ids::parse(one)
+    {
+        return polly_core::ops::loft::boundary_loop(m, e);
+    }
+    ids.iter()
+        .map(|s| match polly_core::ids::parse(s) {
+            Ok(polly_core::ids::Element::Vert(v)) => Ok(v),
+            _ => invalid(format!("'{s}': give vertex ids in order, or a single border edge")),
+        })
+        .collect()
+}
+
+fn bridge_loops(ctx: &mut Ctx, a: BridgeLoops) -> Result<Out> {
+    edit_mesh(ctx, &a.object, None, "bridge loops", |m, _| {
+        let (la, lb) = (loop_arg(m, &a.a)?, loop_arg(m, &a.b)?);
+        let faces = polly_core::ops::loft::bridge_loops(m, &la, &lb, a.closed)?;
+        Ok(Selection { faces, ..Default::default() })
     })
 }
