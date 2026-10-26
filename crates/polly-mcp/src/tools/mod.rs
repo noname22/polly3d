@@ -5,6 +5,7 @@ pub mod history;
 pub mod io;
 pub mod paint;
 pub mod query;
+pub mod reference;
 pub mod scene;
 pub mod scenes;
 pub mod uv;
@@ -23,6 +24,7 @@ pub fn registry() -> Registry {
     tools.extend(view::tools());
     tools.extend(anim::tools());
     tools.extend(variants::tools());
+    tools.extend(reference::tools());
     tools.extend(uv::tools());
     tools.extend(paint::tools());
     tools.extend(io::tools());

@@ -7,6 +7,7 @@ pub mod ids;
 pub mod mesh;
 pub mod ops;
 pub mod primitives;
+pub mod reference;
 pub mod scene;
 pub mod select;
 pub mod variants;

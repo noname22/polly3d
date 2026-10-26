@@ -36,6 +36,7 @@ Conventions
 
 Workflow that works well
 1. Block out with primitives (add_primitive), keep segment counts low.
+   Modelling from a drawing? add_reference shows it behind the model in the front/right/top view (crop one view out of a sheet; set height to the subject's real height), then compare with render view "front" etc.
 2. Look: render (view persp/front/right/top, overlays face_ids) or render_contact_sheet. Check ids before editing.
 3. Refine with select (by normal / box / loops / part) + extrude, inset, bevel, loop_cut, move/scale. Render again after each meaningful change.
    - Organic shaping: move/rotate/scale with `falloff` (soft selection; `connected: true` to leave nearby separate parts alone).

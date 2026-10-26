@@ -844,3 +844,58 @@ fn runtime_gear_export() {
     let anim = doc.animations().next().unwrap();
     assert!(anim.channels().any(|c| c.target().node().name() == Some("head")));
 }
+
+/// Reference images: placement, crop, layer, opacity, views, undo.
+#[test]
+fn reference_images() {
+    let s = server();
+    let dir = std::env::temp_dir().join(format!("polly-ref-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // 64x32 sheet: red left half, green right half. The crop uses the green half.
+    let img = image::RgbaImage::from_fn(64, 32, |x, _| if x < 32 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 255, 0, 255]) });
+    let path = dir.join("sheet.png");
+    img.save(&path).unwrap();
+    let r = call(&s, "add_reference", json!({"path": path.to_str().unwrap(), "view": "front", "crop": [32, 0, 32, 32]}));
+    std::fs::remove_dir_all(&dir).ok();
+    // Defaults: 2 units high, standing on the ground, square from the crop.
+    assert_eq!(r["corners"]["top_left"], json!([-1.0, 2.0, 0.0]), "{r}");
+    assert_eq!(r["corners"]["bottom_right"], json!([1.0, 0.0, 0.0]));
+    assert_eq!(r["layer"], "behind");
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.4, 0.4, 0.4]}, "name": "Box", "position": [0, 1, 0]}));
+    call(&s, "create_material", json!({"name": "Blue", "color": "#2040ff"}));
+    call(&s, "assign_material", json!({"object": "Box", "elements": ["all"], "material": "Blue"}));
+
+    let render = |view: &str| -> Option<image::RgbaImage> {
+        let r = s.call("render", json!({"view": view, "width": 260, "height": 260, "overlays": {"wireframe": false, "grid": false, "selection": false}, "legend": false}));
+        if r.is_error == Some(true) {
+            eprintln!("skipping: {}", text(&r));
+            return None;
+        }
+        Some(image::load_from_memory(&images(&r)[0]).unwrap().to_rgba8())
+    };
+    let Some(front) = render("front") else { return };
+    // The view frames the reference: 2 units * 1.3 padding = 260 px, so 100 px per unit, centred on (0, 1).
+    let at = |img: &image::RgbaImage, x: f32, y: f32| *img.get_pixel((130.0 + x * 100.0) as u32, (130.0 - (y - 1.0) * 100.0) as u32);
+    let near_corner = at(&front, 0.9, 1.9);
+    assert!(near_corner[1] > 100 && near_corner[0] < 80, "half-transparent green behind: {near_corner:?}");
+    let outside = at(&front, 1.1, 1.0);
+    assert!(outside[1] < 80, "nothing outside the image: {outside:?}");
+    let model = at(&front, 0.0, 1.0);
+    assert!(model[2] > 150 && model[1] < 120, "the model covers a reference behind it: {model:?}");
+    // On top at full opacity it covers the model.
+    call(&s, "update_reference", json!({"name": "sheet", "layer": "front", "opacity": 1.0}));
+    let front = render("front").unwrap();
+    let model = at(&front, 0.0, 1.0);
+    assert!(model[1] > 240 && model[2] < 20, "reference over the model: {model:?}");
+    // Other views don't show it.
+    for v in ["right", "persp"] {
+        let img = render(v).unwrap();
+        assert!(!img.pixels().any(|p| p[1] > 200 && p[0] < 50 && p[2] < 50), "{v} shows no reference");
+    }
+    // Undoable; removable; listed.
+    call(&s, "undo", json!({}));
+    assert_eq!(call(&s, "list_references", json!({}))["references"][0]["layer"], "behind");
+    call_err(&s, "update_reference", json!({"name": "sheet", "crop": [60, 0, 10, 10]}));
+    call(&s, "remove_reference", json!({"name": "sheet"}));
+    assert_eq!(call(&s, "list_references", json!({}))["references"], json!([]));
+}

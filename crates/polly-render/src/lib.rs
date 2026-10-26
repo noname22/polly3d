@@ -18,7 +18,7 @@ mod prep;
 mod uv_layout;
 
 pub use camera::{CameraInfo, orbit_dir};
-pub use gpu::{Rendered, Renderer, Tile, resolve_camera};
+pub use gpu::{Rendered, Renderer, Tile, reference_bounds, resolve_camera};
 pub use options::{Overlays, RenderOptions, View};
 pub use prep::{Hit, pick};
 pub use uv_layout::render_uv_layout;

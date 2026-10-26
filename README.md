@@ -115,6 +115,21 @@ hidden with `KHR_node_visibility`), hideable parts as separate nodes, and the
 slot table in `extras`. See [docs/gltf-extras.md](docs/gltf-extras.md) for the
 format and [docs/bevy.md](docs/bevy.md) for using it in Bevy.
 
+## Reference images
+
+A reference image (a character sheet, a blueprint) is shown behind or over the
+model in the front, right or top view. It is placed in world units, so it zooms
+with the model and stays put while the camera re-frames. `crop` picks one view
+out of a multi-view sheet, and `height` scales it to the subject's real size.
+The agent manages references with `add_reference`, `update_reference`,
+`remove_reference` and `list_references`; they appear in its `render` of that
+view and are saved in the project file.
+
+In the viewer:
+- The References panel toggles each image, switches it between Behind and On top, sets its opacity and removes it.
+- "Add reference…" in the toolbar opens a file chooser for the current Front/Right/Top view. Dropping an image file on the window does the same on X11, macOS and Windows; winit doesn't support file drops on Wayland.
+- These changes are undoable edits of the scene, so the agent sees them too.
+
 ## Conventions the agent sees
 
 - Y up, right-handed. The "front" view looks from +Z.

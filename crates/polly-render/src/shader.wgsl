@@ -170,3 +170,32 @@ fn vs_line(@builtin(vertex_index) vi: u32, l: LineIn) -> LineOut {
 fn fs_line(i: LineOut) -> @location(0) vec4<f32> {
     return encode(i.color);
 }
+
+// ---- reference images ----
+// Uses the material group: mat.base.a = opacity.
+
+struct RefIn {
+    @location(0) pos: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+struct RefOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_ref(v: RefIn) -> RefOut {
+    var o: RefOut;
+    o.clip = g.view_proj * vec4<f32>(v.pos, 1.0);
+    // Never clipped by near/far: draw order alone decides behind / on top.
+    o.clip.z = 0.5 * o.clip.w;
+    o.uv = v.uv;
+    return o;
+}
+
+@fragment
+fn fs_ref(i: RefOut) -> @location(0) vec4<f32> {
+    let c = textureSample(tex, samp, i.uv);
+    return encode(vec4<f32>(c.rgb, c.a * mat.base.a));
+}

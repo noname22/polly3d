@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 use anyhow::{Context, Result, anyhow};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
+use polly_core::reference::{Layer, RefView};
 use polly_core::scene::{Filter, Material, Scene, TextureId};
 use wgpu::util::DeviceExt;
 
@@ -74,7 +75,12 @@ pub(crate) fn setup(scene: &Scene, o: &RenderOptions, size: [u32; 2]) -> Setup {
     };
     let frame = match o.frame_bounds {
         Some([lo, hi]) => (Vec3::from(lo), Vec3::from(hi)),
-        None => world_bounds(&focus_refs).or_else(|| world_bounds(&all_refs)).unwrap_or((Vec3::splat(-1.0), Vec3::splat(1.0))),
+        None => {
+            let objects = world_bounds(&focus_refs).or_else(|| world_bounds(&all_refs));
+            // Unfocused axis views also frame their reference images.
+            let refs = if focus.is_none() && o.overlays.references { reference_bounds(scene, &o.view) } else { None };
+            union(objects, refs).unwrap_or((Vec3::splat(-1.0), Vec3::splat(1.0)))
+        }
     };
     if prep.objects.is_empty() {
         notes.push("scene has no visible objects".into());
@@ -87,6 +93,34 @@ pub(crate) fn setup(scene: &Scene, o: &RenderOptions, size: [u32; 2]) -> Setup {
     let cam = camera::resolve(&o.view, frame, depth, o.zoom, size);
     let frame_radius = ((frame.1 - frame.0).length() * 0.5).max(0.05);
     Setup { prep, cam, frame_radius, notes }
+}
+
+fn union(a: Option<(Vec3, Vec3)>, b: Option<(Vec3, Vec3)>) -> Option<(Vec3, Vec3)> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.max(b.1))),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The reference image view an axis view shows, if any.
+pub fn reference_view(view: &crate::View) -> Option<RefView> {
+    match view {
+        crate::View::Front => Some(RefView::Front),
+        crate::View::Right => Some(RefView::Right),
+        crate::View::Top => Some(RefView::Top),
+        _ => None,
+    }
+}
+
+/// World bounds of the visible reference images `view` shows.
+pub fn reference_bounds(scene: &Scene, view: &crate::View) -> Option<(Vec3, Vec3)> {
+    let v = reference_view(view)?;
+    scene
+        .references
+        .iter()
+        .filter(|r| r.visible && r.view == v)
+        .flat_map(|r| r.quad().map(|(p, _)| p))
+        .fold(None, |acc, p| union(acc, Some((p, p))))
 }
 
 /// The camera `render` would use for these options (without rendering), e.g.
@@ -122,6 +156,15 @@ struct Pipelines {
     mesh_cull: wgpu::RenderPipeline,
     mesh_double: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
+    reference: wgpu::RenderPipeline,
+}
+
+/// Vertex of a reference image quad.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RefVertex {
+    pos: [f32; 3],
+    uv: [f32; 2],
 }
 
 struct GpuTexture {
@@ -162,6 +205,10 @@ pub struct Renderer {
     sampler_linear: wgpu::Sampler,
     white: wgpu::TextureView,
     textures: HashMap<TextureId, GpuTexture>,
+    /// Reference images by name, keyed by their pixel buffer's address
+    /// (reference pixels never change in place).
+    references: HashMap<String, (usize, GpuTexture)>,
+    sampler_clamp: wgpu::Sampler,
     targets: Option<Targets>,
     offscreen: Option<Offscreen>,
 }
@@ -292,6 +339,12 @@ impl Renderer {
             })
         };
         let sampler_nearest = sampler(wgpu::FilterMode::Nearest);
+        let sampler_clamp = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("reference sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let sampler_linear = sampler(wgpu::FilterMode::Linear);
         let white_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("white"),
@@ -324,6 +377,8 @@ impl Renderer {
             sampler_linear,
             white,
             textures: HashMap::new(),
+            references: HashMap::new(),
+            sampler_clamp,
             targets: None,
             offscreen: None,
         }
@@ -438,7 +493,43 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
-        Pipelines { mesh_cull: mesh(Some(wgpu::Face::Back), "mesh"), mesh_double: mesh(None, "mesh double-sided"), lines }
+        let ref_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2];
+        let reference = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("reference"),
+            layout: Some(&self.layout_mesh),
+            vertex: wgpu::VertexState {
+                module: &self.shader,
+                entry_point: Some("vs_ref"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<RefVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &ref_attrs,
+                })],
+            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: ms,
+            fragment: Some(wgpu::FragmentState {
+                module: &self.shader,
+                entry_point: Some("fs_ref"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        Pipelines { mesh_cull: mesh(Some(wgpu::Face::Back), "mesh"), mesh_double: mesh(None, "mesh double-sided"), lines, reference }
     }
 
     fn ensure_targets(&mut self, format: wgpu::TextureFormat, size: [u32; 2]) -> u32 {
@@ -508,6 +599,42 @@ impl Renderer {
             g.hash = hash;
         }
         Some(g.view.clone())
+    }
+
+    /// GPU texture of a reference image (uploaded once per pixel buffer).
+    fn reference_view(&mut self, r: &polly_core::reference::Reference, notes: &mut Vec<String>) -> Option<wgpu::TextureView> {
+        if r.width == 0 || r.height == 0 || r.pixels.len() != (r.width * r.height * 4) as usize {
+            notes.push(format!("reference '{}' has invalid image data", r.name));
+            return None;
+        }
+        let max = self.device.limits().max_texture_dimension_2d;
+        if r.width > max || r.height > max {
+            notes.push(format!("reference '{}' exceeds GPU limit {max}", r.name));
+            return None;
+        }
+        let key = std::sync::Arc::as_ptr(&r.pixels) as usize;
+        if self.references.get(&r.name).is_none_or(|(k, g)| *k != key || g.w != r.width || g.h != r.height) {
+            let ext = wgpu::Extent3d { width: r.width, height: r.height, depth_or_array_layers: 1 };
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("reference image"),
+                size: ext,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                tex.as_image_copy(),
+                &r.pixels,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(r.width * 4), rows_per_image: None },
+                ext,
+            );
+            let view = tex.create_view(&Default::default());
+            self.references.insert(r.name.clone(), (key, GpuTexture { w: r.width, h: r.height, hash: 0, tex, view }));
+        }
+        Some(self.references[&r.name].1.view.clone())
     }
 
     /// Resolve camera + geometry and encode GPU passes into `view`.
@@ -638,6 +765,47 @@ impl Renderer {
             });
             draws.push(Draw { vb, count: verts.len() as u32, bg, double: *double });
         }
+        // ---- reference images (only in their own orthographic view) ----
+        struct RefDraw {
+            vb: wgpu::Buffer,
+            bg: wgpu::BindGroup,
+            front: bool,
+        }
+        let mut ref_draws = Vec::new();
+        let shown_view = [RefView::Front, RefView::Right, RefView::Top].into_iter().find(|v| {
+            let (u, up) = v.axes();
+            cam.ortho && f.dot(-u.cross(up)) > 0.999
+        });
+        if o.overlays.references {
+            for rf in scene.references.iter().filter(|r| r.visible && Some(r.view) == shown_view && r.opacity > 0.0) {
+                let Some(tview) = self.reference_view(rf, &mut notes) else { continue };
+                let q = rf.quad();
+                let verts: Vec<RefVertex> =
+                    [0, 1, 2, 0, 2, 3].iter().map(|&i| RefVertex { pos: q[i].0.to_array(), uv: q[i].1 }).collect();
+                let mu = MaterialUniform { base: [1.0, 1.0, 1.0, rf.opacity.clamp(0.0, 1.0)], params: [0.0; 4] };
+                let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("reference"),
+                    contents: bytemuck::bytes_of(&mu),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("reference"),
+                    layout: &self.material_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&tview) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler_clamp) },
+                    ],
+                });
+                let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("reference quad"),
+                    contents: bytemuck::cast_slice(&verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                ref_draws.push(RefDraw { vb, bg, front: rf.layer == Layer::Front });
+            }
+        }
+        self.references.retain(|name, _| scene.references.iter().any(|r| &r.name == name));
         let line_buf = (!line_insts.is_empty()).then(|| {
             self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("lines"),
@@ -689,6 +857,15 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &globals_bg, &[]);
+            let draw_refs = |pass: &mut wgpu::RenderPass, front: bool| {
+                for d in ref_draws.iter().filter(|d| d.front == front) {
+                    pass.set_pipeline(&pipes.reference);
+                    pass.set_bind_group(1, &d.bg, &[]);
+                    pass.set_vertex_buffer(0, d.vb.slice(..));
+                    pass.draw(0..6, 0..1);
+                }
+            };
+            draw_refs(&mut pass, false);
             for d in &draws {
                 pass.set_pipeline(if d.double { &pipes.mesh_double } else { &pipes.mesh_cull });
                 pass.set_bind_group(1, &d.bg, &[]);
@@ -701,6 +878,7 @@ impl Renderer {
                 pass.set_vertex_buffer(0, lb.slice(..));
                 pass.draw(0..6, 0..line_insts.len() as u32);
             }
+            draw_refs(&mut pass, true);
         }
         self.queue.submit([enc.finish()]);
         Ok(Frame { prep, cam, notes, frame_radius })

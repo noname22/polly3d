@@ -110,6 +110,8 @@ pub struct Overlays {
     pub bone_names: bool,
     /// Also label elements that face away from / are hidden from the camera.
     pub backface_labels: bool,
+    /// Reference images, in the front/right/top view they belong to. Default true.
+    pub references: bool,
 }
 
 impl Default for Overlays {
@@ -130,6 +132,7 @@ impl Default for Overlays {
             bones: false,
             bone_names: false,
             backface_labels: false,
+            references: true,
         }
     }
 }

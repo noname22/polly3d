@@ -120,7 +120,7 @@ impl Texture {
     }
 }
 
-mod b64 {
+pub(crate) mod b64 {
     use base64::Engine;
     use serde::{Deserialize, Deserializer, Serializer};
     use std::sync::Arc;
@@ -171,6 +171,9 @@ pub struct Scene {
     /// Swappable gear: slot name -> variants (see `variants`).
     #[serde(default)]
     pub slots: BTreeMap<String, crate::variants::Slot>,
+    /// Reference images shown in the front/right/top views.
+    #[serde(default)]
+    pub references: Vec<crate::reference::Reference>,
     #[serde(default)]
     next_clip: crate::anim::ClipId,
     next_object: ObjectId,
@@ -195,6 +198,7 @@ impl Default for Scene {
             background: default_bg(),
             clips: BTreeMap::new(),
             slots: BTreeMap::new(),
+            references: Vec::new(),
             next_clip: 1,
             next_object: 1,
             next_material: 1,
