@@ -4,3 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+polly-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+image.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+gltf.workspace = true

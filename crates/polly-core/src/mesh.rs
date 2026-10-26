@@ -406,6 +406,47 @@ impl Mesh {
         }
     }
 
+    /// Shading normal for every face corner, keyed by (face, corner index).
+    /// Flat faces use the face normal; smooth faces average with smooth
+    /// neighbours around the vertex, without crossing sharp edges.
+    pub fn corner_normals(&self) -> HashMap<(FaceId, usize), Vec3> {
+        let ef = self.edge_faces();
+        let fnv: HashMap<FaceId, Vec3> =
+            self.faces.iter().map(|(id, f)| (*id, newell_vector(&self.face_positions(f)))).collect();
+        let mut out = HashMap::new();
+        for (&fid, f) in &self.faces {
+            for (i, &v) in f.verts.iter().enumerate() {
+                if !f.smooth {
+                    out.insert((fid, i), fnv[&fid].normalize_or_zero());
+                    continue;
+                }
+                // Flood across non-sharp edges at v between smooth faces.
+                let mut group = vec![fid];
+                let mut k = 0;
+                while k < group.len() {
+                    let g = &self.faces[&group[k]];
+                    k += 1;
+                    let n = g.len();
+                    let j = g.index_of(v).unwrap();
+                    for other in [g.verts[(j + 1) % n], g.verts[(j + n - 1) % n]] {
+                        let e = Edge::new(v, other);
+                        if self.sharp.contains(&e) {
+                            continue;
+                        }
+                        for h in ef.get(&e).into_iter().flatten() {
+                            if !group.contains(h) && self.faces[h].smooth {
+                                group.push(*h);
+                            }
+                        }
+                    }
+                }
+                let n: Vec3 = group.iter().map(|g| fnv[g]).sum();
+                out.insert((fid, i), n.normalize_or_zero());
+            }
+        }
+        out
+    }
+
     pub fn triangle_count(&self) -> usize {
         self.faces.values().map(|f| f.len() - 2).sum()
     }

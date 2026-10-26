@@ -157,12 +157,19 @@ impl Selection {
         self.edges.retain(|e| edges.contains(e));
     }
 
+    /// Compact JSON with empty kinds omitted.
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "verts": verts(self.verts.iter().copied()),
-            "edges": edges(self.edges.iter().copied()),
-            "faces": faces(self.faces.iter().copied()),
-        })
+        let mut m = serde_json::Map::new();
+        if !self.verts.is_empty() {
+            m.insert("verts".into(), verts(self.verts.iter().copied()).into());
+        }
+        if !self.edges.is_empty() {
+            m.insert("edges".into(), edges(self.edges.iter().copied()).into());
+        }
+        if !self.faces.is_empty() {
+            m.insert("faces".into(), faces(self.faces.iter().copied()).into());
+        }
+        m.into()
     }
 }
 

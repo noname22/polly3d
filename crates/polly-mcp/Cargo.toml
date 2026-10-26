@@ -4,3 +4,17 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+polly-core.workspace = true
+rmcp.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+polly-export.workspace = true
+tracing.workspace = true
+polly-paint.workspace = true
+
+[dev-dependencies]
+polly-core.workspace = true
