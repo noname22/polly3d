@@ -68,6 +68,10 @@ pub struct Object {
     /// clips deform this mesh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skin: Option<SkinBinding>,
+    /// Attached to this bone of the parent's skeleton: the transform is
+    /// relative to the bone's frame and follows it when posed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_bone: Option<crate::anim::BoneId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +225,7 @@ impl Scene {
                 morph_weights: BTreeMap::new(),
                 morph_edit: None,
                 skin: None,
+                parent_bone: None,
             },
         );
         self.active = Some(id);
@@ -268,6 +273,7 @@ impl Scene {
         for other in self.objects.values_mut() {
             if other.parent == Some(id) {
                 other.parent = o.parent;
+                other.parent_bone = None;
             }
             if other.skin.is_some_and(|s| s.armature == id) {
                 other.skin = None;
@@ -297,13 +303,22 @@ impl Scene {
         }
     }
 
+    /// Rest frame of the bone `id` is attached to, in its parent's space
+    /// (identity when not attached to a bone).
+    pub fn bone_frame(&self, id: ObjectId) -> Mat4 {
+        let Some(o) = self.objects.get(&id) else { return Mat4::IDENTITY };
+        o.parent_bone
+            .and_then(|b| self.objects.get(&o.parent?)?.skeleton.as_ref()?.bones.get(&b))
+            .map_or(Mat4::IDENTITY, |b| b.rest_matrix())
+    }
+
     pub fn world_matrix(&self, id: ObjectId) -> Mat4 {
         let mut m = Mat4::IDENTITY;
         let mut cur = Some(id);
         let mut guard = 0;
         while let Some(c) = cur {
             let Some(o) = self.objects.get(&c) else { break };
-            m = o.transform.matrix() * m;
+            m = self.bone_frame(c) * o.transform.matrix() * m;
             cur = o.parent;
             guard += 1;
             if guard > 64 {
@@ -324,7 +339,11 @@ impl Scene {
                 cur = self.objects.get(&c).and_then(|o| o.parent);
             }
         }
-        self.object_mut(id)?.parent = parent;
+        let o = self.object_mut(id)?;
+        if o.parent != parent {
+            o.parent_bone = None;
+        }
+        o.parent = parent;
         Ok(())
     }
 

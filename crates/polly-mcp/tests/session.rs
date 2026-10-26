@@ -574,9 +574,93 @@ fn shared_armature() {
     let dir = std::env::temp_dir().join(format!("polly-armature-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let r = call(&s, "export_glb", json!({"path": dir.join("a.glb").to_str().unwrap()}));
-    assert!(r["warning"].as_str().unwrap().contains("Body"), "{r}");
+    assert!(r["not_yet_supported"][0].as_str().unwrap().contains("Body"), "{r}");
     std::fs::remove_dir_all(dir).ok();
     call(&s, "delete_object", json!({"object": "Rig"}));
     let sc = call(&s, "describe_scene", json!({}));
     assert!(sc["objects"].as_array().unwrap().iter().all(|o| o.get("skinned_to").is_none()), "{sc}");
+}
+
+/// Phase 2 of gear support: weight transfer and bone attachment.
+#[test]
+fn fitting_gear() {
+    let s = server();
+    let world_center = |s: &PollyServer, name: &str| -> [f64; 3] {
+        let sc = call(s, "describe_scene", json!({}));
+        let o = sc["objects"].as_array().unwrap().iter().find(|o| o["name"] == name).unwrap().clone();
+        let (lo, hi) = (&o["world_bounds"]["min"], &o["world_bounds"]["max"]);
+        [0, 1, 2].map(|i| (lo[i].as_f64().unwrap() + hi[i].as_f64().unwrap()) / 2.0)
+    };
+    call(&s, "add_mesh", json!({"name": "Rig", "vertices": [], "faces": []}));
+    call(&s, "add_bone_chain", json!({"object": "Rig", "points": [[0, -1, 0], [0, 0, 0], [0, 1, 0]], "names": ["upper", "lower"]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "radius_bottom": 0.2, "radius_top": 0.2, "height": 2, "segments": 8, "height_segments": 6}, "name": "Body"}));
+    call(&s, "bind_to_armature", json!({"object": "Body", "armature": "Rig"}));
+    call(&s, "auto_weights", json!({"object": "Body", "method": {"mode": "smooth"}}));
+
+    // A skirt around the lower body gets the body's weights and its armature.
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "radius_bottom": 0.35, "radius_top": 0.25, "height": 0.7, "segments": 8, "caps": false}, "name": "Skirt", "position": [0, -0.6, 0]}));
+    let t = call(&s, "transfer_weights", json!({"object": "Skirt", "from": "Body"}));
+    assert_eq!(t["armature"], "Rig", "{t}");
+    assert_eq!(t["weighted_verts"], 16, "{t}");
+    assert!(t.get("far_from_source").is_none(), "{t}");
+    assert_eq!(call(&s, "describe_scene", json!({}))["objects"].as_array().unwrap().iter().find(|o| o["name"] == "Skirt").unwrap()["skinned_to"], "Rig");
+
+    // A sword at the forearm tip, attached to the lower bone, keeps its place...
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.05, 0.6, 0.05]}, "name": "Sword", "position": [0, 1.3, 0]}));
+    let before = world_center(&s, "Sword");
+    let r = call(&s, "attach_to_bone", json!({"object": "Sword", "armature": "Body", "bone": "lower"}));
+    assert_eq!(r["to"], "Rig / lower", "{r}");
+    let after = world_center(&s, "Sword");
+    assert!((0..3).all(|i| (before[i] - after[i]).abs() < 1e-4), "{before:?} -> {after:?}");
+    let e = call_err(&s, "attach_to_bone", json!({"object": "Skirt", "armature": "Rig", "bone": "lower"}));
+    assert!(e.contains("skinned"), "{e}");
+    // ...and swings with the bone.
+    call(&s, "pose_bone", json!({"object": "Rig", "bone": "lower", "rotation": [0, 0, 90]}));
+    {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let sc = &g.doc.scene;
+        let posed = polly_core::anim::pose_scene(sc, &[]);
+        let id = sc.resolve(Some("Sword")).unwrap();
+        let c = posed.world_matrix(id).transform_point3(polly_core::glam::Vec3::ZERO);
+        assert!((c - polly_core::glam::Vec3::new(-1.3, 0.0, 0.0)).length() < 1e-3, "sword at {c}");
+    }
+    call(&s, "clear_pose", json!({"object": "Rig"}));
+
+    // A bracer on arm.L, mirrored, ends up on arm.R; deleting arm.R leaves it in place.
+    call(&s, "add_bone", json!({"object": "Rig", "name": "arm.L", "head": [0.3, 0.5, 0], "tail": [0.8, 0.5, 0]}));
+    call(&s, "add_bone", json!({"object": "Rig", "name": "arm.R", "head": [-0.3, 0.5, 0], "tail": [-0.8, 0.5, 0]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "radius_bottom": 0.1, "radius_top": 0.1, "height": 0.2, "segments": 6}, "name": "Bracer.L", "position": [0.55, 0.5, 0], "rotation": [0, 0, 90]}));
+    call(&s, "attach_to_bone", json!({"object": "Bracer.L", "armature": "Rig", "bone": "arm.L"}));
+    call(&s, "mirror_object", json!({"object": "Bracer.L"}));
+    let sc = call(&s, "describe_scene", json!({}));
+    let br = sc["objects"].as_array().unwrap().iter().find(|o| o["name"] == "Bracer.R").unwrap().clone();
+    assert_eq!(br["attached_to"], "Rig / arm.R", "{br}");
+    let c = world_center(&s, "Bracer.R");
+    assert!((c[0] + 0.55).abs() < 1e-3 && (c[1] - 0.5).abs() < 1e-3, "{c:?}");
+    call(&s, "delete_bone", json!({"object": "Rig", "bone": "arm.R"}));
+    let c2 = world_center(&s, "Bracer.R");
+    assert!((0..3).all(|i| (c[i] - c2[i]).abs() < 1e-4), "{c:?} -> {c2:?}");
+
+    // Export: the sword node sits at its rest place; the limitation is reported.
+    let dir = std::env::temp_dir().join(format!("polly-gear-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("g.glb");
+    let r = call(&s, "export_glb", json!({"path": path.to_str().unwrap()}));
+    assert!(r["not_yet_supported"].to_string().contains("Sword"), "{r}");
+    let (doc, _, _) = gltf::import(&path).unwrap();
+    let mut world = std::collections::HashMap::new();
+    fn walk(n: gltf::Node, parent: polly_core::glam::Mat4, out: &mut std::collections::HashMap<String, polly_core::glam::Mat4>) {
+        let m = parent * polly_core::glam::Mat4::from_cols_array_2d(&n.transform().matrix());
+        out.insert(n.name().unwrap_or("").to_string(), m);
+        for c in n.children() {
+            walk(c, m, out);
+        }
+    }
+    for n in doc.scenes().next().unwrap().nodes() {
+        walk(n, polly_core::glam::Mat4::IDENTITY, &mut world);
+    }
+    let p = world["Sword"].transform_point3(polly_core::glam::Vec3::ZERO);
+    assert!((p - polly_core::glam::Vec3::new(0.0, 1.3, 0.0)).length() < 1e-3, "sword exported at {p}");
+    std::fs::remove_dir_all(dir).ok();
 }

@@ -51,6 +51,7 @@ Workflow that works well
 Rigging & animation (optional)
 - Rig: add_bone / add_bone_chain (head/tail points in object space), check with render overlays {"bones":true,"bone_names":true}.
 - Characters with separate parts or gear: put the skeleton on one object (an armature, e.g. an empty "Rig" from add_mesh with no faces), then bind_to_armature each mesh (body, hair, clothing). One pose and one set of clips then drive them all. Bone, pose and clip tools accept a bound mesh and act on its armature; weights stay per mesh.
+- Gear: rigid items (helmet, sword, bracer) -> attach_to_bone; fitted deforming items (skirt, sleeves, cape, long hair) -> transfer_weights from the body (binds them too). mirror_object moves both to the mirrored bones.
 - Skin: auto_weights (rigid = each vertex follows one bone, the classic low-poly look; smooth = blended joints) or assign_weights; check with render {"show_weights":"<bone>"} and weight_report.
 - Pose: pose_bone (Euler degrees around the bone's own axes), then key_pose into a clip (create_clip; frames at the clip's fps). Repeat at other frames. Loop regions via update_clip.
 - Morphs: begin_morph, move vertices with the normal tools, end_morph; set_morph_weight or key them (key_pose with morphs, or set_key).

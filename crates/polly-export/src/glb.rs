@@ -335,12 +335,14 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
             }
             pj.push(prim);
         }
-        let t = &o.transform;
+        // Objects attached to a bone: bake the bone's rest frame so they sit in
+        // the right place (they don't follow bone animation in the file yet).
+        let (sc, rot, tr) = (scene.bone_frame(*id) * o.transform.matrix()).to_scale_rotation_translation();
         let mut node = json!({
             "name": o.name,
-            "translation": t.translation.to_array(),
-            "rotation": t.rotation.to_array(),
-            "scale": t.scale.to_array(),
+            "translation": tr.to_array(),
+            "rotation": rot.to_array(),
+            "scale": sc.to_array(),
         });
         if !pj.is_empty() {
             let mut mj = json!({"name": o.name, "primitives": pj});

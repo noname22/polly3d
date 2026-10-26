@@ -94,7 +94,9 @@ element ids, picking and painting all work on the posed model.
 A skeleton can live on one object, an armature, with other meshes bound to it
 (`bind_to_armature`). One pose and one set of clips then deform the body and
 all its gear together. Bone, pose and clip tools accept a bound mesh and act
-on its armature, while skin weights stay on each mesh. Shared-armature skins
+on its armature, while skin weights stay on each mesh. Rigid gear is attached
+to a bone (`attach_to_bone`) and follows it; fitted gear gets the body's
+weights with `transfer_weights`. Shared-armature skins
 are not exported to GLB yet; `export_glb` warns about such meshes.
 
 ## Conventions the agent sees

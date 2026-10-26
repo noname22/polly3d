@@ -29,6 +29,18 @@ pub fn tools() -> Vec<ToolDef> {
             bind_to_armature,
         ),
         def("unbind", "Stop skinning an object to its armature (its weights are kept).", false, unbind),
+        def(
+            "attach_to_bone",
+            "Attach rigid gear (helmet, sword, shield, bracer) to a bone: it keeps its current placement and follows the bone when posed or animated. Use set_parent to detach.",
+            false,
+            attach_to_bone,
+        ),
+        def(
+            "transfer_weights",
+            "Give fitted, deforming gear (skirt, sleeves, long hair, cape) skin weights copied from the nearest surface of a skinned mesh (usually the body), then bind it to that mesh's armature.",
+            false,
+            transfer_weights,
+        ),
         def("edit_bone", "Rename, move (head/tail), re-parent or roll a bone (rest pose).", false, edit_bone),
         def("delete_bone", "Delete a bone; its children are re-parented and its weights removed.", false, delete_bone),
         def("list_bones", "List an object's bones with rest head/tail, parent, current pose and how many vertices each one influences.", true, list_bones),
@@ -324,6 +336,16 @@ fn delete_bone(ctx: &mut Ctx, a: BoneArg) -> Result<Out> {
     let obj = rig(&ctx.doc.scene, resolve(&ctx.doc.scene, &a.object)?);
     let id = bone_of(&ctx.doc.scene, obj, &a.bone)?;
     edit_scene(ctx, "delete bone", |s| {
+        // Gear attached to this bone stays where it is, as a plain child of the rig.
+        let attached: Vec<ObjectId> = s.objects.iter().filter(|(_, o)| o.parent == Some(obj) && o.parent_bone == Some(id)).map(|(i, _)| *i).collect();
+        for g in attached {
+            let world = s.world_matrix(g);
+            let pw = s.world_matrix(obj);
+            let gear = s.object_mut(g)?;
+            gear.parent_bone = None;
+            let (sc, r, t) = (pw.inverse() * world).to_scale_rotation_translation();
+            gear.transform = polly_core::scene::Transform { translation: t, rotation: r, scale: sc };
+        }
         let o = s.object_mut(obj)?;
         o.skeleton.as_mut().unwrap().remove(id)?;
         o.pose.remove(&id);
@@ -1229,4 +1251,104 @@ fn unbind(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
         Ok(())
     })?;
     Ok(ok("unbound (weights kept)"))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Attach {
+    /// The gear to attach (default: active).
+    object: Option<String>,
+    /// Object with the skeleton (a bound mesh resolves to its armature).
+    armature: String,
+    bone: String,
+}
+
+fn attach_to_bone(ctx: &mut Ctx, a: Attach) -> Result<Out> {
+    let s = &ctx.doc.scene;
+    let obj = resolve(s, &a.object)?;
+    let arm = rig(s, s.resolve(Some(&a.armature))?);
+    if obj == arm {
+        bail!("an object cannot be attached to its own bones");
+    }
+    if s.object(obj)?.skin.is_some() {
+        bail!("'{}' is skinned (bound to an armature); attach rigid gear only, or unbind it first", s.object(obj)?.name);
+    }
+    let bone = bone_of(s, arm, &a.bone)?;
+    edit_scene(ctx, "attach to bone", |s| {
+        let world = s.world_matrix(obj);
+        s.set_parent(obj, Some(arm))?;
+        let o = s.object_mut(obj)?;
+        o.parent_bone = Some(bone);
+        // Keep the world placement: local = (rig × bone rest frame)⁻¹ × world.
+        let frame = s.world_matrix(arm) * s.bone_frame(obj);
+        let (sc, r, t) = (frame.inverse() * world).to_scale_rotation_translation();
+        s.object_mut(obj)?.transform = polly_core::scene::Transform { translation: t, rotation: r, scale: sc };
+        Ok(())
+    })?;
+    let name = &ctx.doc.scene.objects[&arm].name;
+    let out = Out::json(json!({"attached": ctx.doc.scene.objects[&obj].name, "to": format!("{name} / {}", a.bone)}));
+    super::view::maybe_preview(ctx, obj, out)
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Transfer {
+    /// The gear to weight (default: active).
+    object: Option<String>,
+    /// A skinned mesh to copy weights from (usually the body).
+    from: String,
+    /// Report vertices further than this from the source surface (default: 10% of the source's size).
+    max_distance: Option<f32>,
+    /// Bind the gear to the source's armature (default true).
+    #[serde(default = "yes")]
+    bind: bool,
+}
+
+fn transfer_weights(ctx: &mut Ctx, a: Transfer) -> Result<Out> {
+    let s = &ctx.doc.scene;
+    let obj = resolve(s, &a.object)?;
+    let from = s.resolve(Some(&a.from))?;
+    if obj == from {
+        bail!("object and source are the same");
+    }
+    let arm = s.skeleton_source(from).with_context(|| format!("'{}' isn't skinned (no skeleton or armature)", a.from))?;
+    if let Some(cur) = s.skeleton_source(obj) {
+        if cur != arm {
+            bail!("'{}' is skinned to a different skeleton; unbind it first", s.object(obj)?.name);
+        }
+    }
+    if s.object(obj)?.skeleton.is_some() {
+        bail!("'{}' has its own skeleton; transfer onto meshes without one", s.object(obj)?.name);
+    }
+    let source = s.object(from)?.mesh.clone();
+    let source_to_skel = s.to_skeleton_space(from);
+    let target_to_skel = s.world_matrix(arm).inverse() * s.world_matrix(obj);
+    let size = source.bounds().map_or(1.0, |(lo, hi)| (hi - lo).length());
+    let limit = a.max_distance.unwrap_or(size * 0.1);
+    let mut far = vec![];
+    let mut worst = 0.0f32;
+    edit_scene(ctx, "transfer weights", |s| {
+        let o = s.object_mut(obj)?;
+        let d = anim::transfer_weights(Arc::make_mut(&mut o.mesh), target_to_skel, &source, source_to_skel)?;
+        far = d.iter().filter(|(_, x)| **x > limit).map(|(v, _)| *v).collect();
+        worst = d.values().copied().fold(0.0, f32::max);
+        if a.bind && o.skin.is_none() && obj != arm {
+            o.skin = Some(polly_core::scene::SkinBinding { armature: arm });
+            let world = s.world_matrix(obj);
+            s.set_parent(obj, Some(arm))?;
+            let (sc, r, t) = (s.world_matrix(arm).inverse() * world).to_scale_rotation_translation();
+            s.object_mut(obj)?.transform = polly_core::scene::Transform { translation: t, rotation: r, scale: sc };
+        }
+        Ok(())
+    })?;
+    let o = ctx.doc.scene.object(obj)?;
+    let mut j = json!({
+        "object": o.name,
+        "weighted_verts": o.mesh.weights.len(),
+        "armature": ctx.doc.scene.objects[&arm].name,
+        "max_distance_to_source": (worst * 1000.0).round() / 1000.0,
+    });
+    if !far.is_empty() {
+        j["far_from_source"] = json!(polly_core::ids::compress("v", far.iter().copied()));
+        j["hint"] = json!("these vertices are far from the source surface; check their weights (render show_weights) or assign_weights by hand");
+    }
+    Ok(Out::json(j))
 }

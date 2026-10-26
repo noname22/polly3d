@@ -300,6 +300,40 @@ pub fn auto_weights_in(
     Ok(())
 }
 
+/// Copy skin weights onto `target` from the nearest surface point of `source`
+/// (blending the three source vertices of that triangle by barycentric
+/// weight), keeping the strongest [`MAX_INFLUENCES`] bones, normalized.
+/// `*_to_skel` map each mesh's local space into the shared skeleton space.
+/// Returns the distance from each target vertex to the source surface.
+pub fn transfer_weights(target: &mut Mesh, target_to_skel: Mat4, source: &Mesh, source_to_skel: Mat4) -> Result<BTreeMap<VertId, f32>> {
+    if source.weights.is_empty() {
+        return invalid("the source mesh has no skin weights");
+    }
+    let bvh = crate::bvh::Bvh::new(source, source_to_skel);
+    let mut dist = BTreeMap::new();
+    let mut new = BTreeMap::new();
+    for (&v, vert) in &target.verts {
+        let p = target_to_skel.transform_point3(vert.pos);
+        let Some((tri, _, bary, d)) = bvh.closest_point(p) else { continue };
+        let t = &bvh.tris[tri];
+        let face = &source.faces[&t.face];
+        let mut acc: BTreeMap<BoneId, f32> = BTreeMap::new();
+        for (k, b) in t.corners.iter().zip([bary.x, bary.y, bary.z]) {
+            for (bone, w) in source.weights.get(&face.verts[*k]).into_iter().flatten() {
+                *acc.entry(*bone).or_default() += w * b;
+            }
+        }
+        let list: Vec<(BoneId, f32)> = acc.into_iter().filter(|(_, w)| *w > 1e-6).collect();
+        if !list.is_empty() {
+            new.insert(v, list);
+        }
+        dist.insert(v, d);
+    }
+    target.weights = new;
+    normalize_weights(target);
+    Ok(dist)
+}
+
 // ---- morph targets --------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -635,7 +669,32 @@ pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
             out.objects.get_mut(&id).unwrap().mesh = Arc::new(mesh);
         }
     }
-    // Pass 3: move the bones of posed skeletons in the display copy.
+    // Pass 3: objects attached to bones follow the posed bone. The display
+    // copy's bones are moved below, so solve for the local transform that
+    // places the object at parent × posed bone frame × local.
+    let attached: Vec<(ObjectId, ObjectId, BoneId)> = out
+        .objects
+        .iter()
+        .filter_map(|(id, o)| Some((*id, o.parent?, o.parent_bone?)))
+        .filter(|(_, p, b)| poses.get(p).is_some_and(|pose| !pose.is_empty()) && out.objects[p].skeleton.as_ref().is_some_and(|s| s.bones.contains_key(b)))
+        .collect();
+    let mut placed = Vec::new();
+    for (id, parent, bone) in attached {
+        let sk = out.objects[&parent].skeleton.as_ref().unwrap();
+        let (posed, rest) = sk.world_matrices(&poses[&parent])[&bone];
+        // The display copy's moved bone gives a rest_matrix without twist; compensate.
+        let mut moved = sk.bones[&bone].clone();
+        let skin = posed * rest.inverse();
+        moved.head = skin.transform_point3(moved.head);
+        moved.tail = skin.transform_point3(moved.tail);
+        let local = moved.rest_matrix().inverse() * posed * out.objects[&id].transform.matrix();
+        let (sc, r, t) = local.to_scale_rotation_translation();
+        placed.push((id, crate::scene::Transform { translation: t, rotation: r, scale: sc }));
+    }
+    for (id, t) in placed {
+        out.objects.get_mut(&id).unwrap().transform = t;
+    }
+    // Pass 4: move the bones of posed skeletons in the display copy.
     for (id, pose) in &poses {
         if pose.is_empty() {
             continue;
@@ -835,6 +894,47 @@ mod tests {
         // Unbinding happens when the armature is deleted.
         s.remove_object(arm_id).unwrap();
         assert!(s.objects[&skin_id].skin.is_none());
+    }
+
+    #[test]
+    fn transfer_weights_onto_a_sleeve() {
+        let (s, id, _, _) = arm();
+        let body = &s.objects[&id].mesh;
+        // A slightly wider copy of the arm, like a sleeve.
+        let mut sleeve = (**body).clone();
+        sleeve.transform(Mat4::from_scale(Vec3::new(1.2, 1.0, 1.2)));
+        sleeve.weights.clear();
+        let d = transfer_weights(&mut sleeve, Mat4::IDENTITY, body, Mat4::IDENTITY).unwrap();
+        assert!(d.values().all(|x| *x < 0.05));
+        for (v, w) in &body.weights {
+            assert_eq!(&sleeve.weights[v], w, "v{v}");
+        }
+    }
+
+    #[test]
+    fn attached_object_follows_its_bone() {
+        let (mut s, id, _, lower) = arm();
+        // A "sword" at the tip of the lower bone, attached to it.
+        let sword = s.add_object("Sword", crate::primitives::cube(Vec3::new(0.05, 0.6, 0.05)));
+        s.set_parent(sword, Some(id)).unwrap();
+        let rest_frame = s.objects[&id].skeleton.as_ref().unwrap().bones[&lower].rest_matrix();
+        {
+            let o = s.objects.get_mut(&sword).unwrap();
+            o.parent_bone = Some(lower);
+            // 1 unit along the bone (its +Y) = the tip at world (0, 1, 0)
+            o.transform.translation = Vec3::new(0.0, 1.0, 0.0);
+        }
+        assert!((s.world_matrix(sword).transform_point3(Vec3::ZERO) - rest_frame.transform_point3(Vec3::Y)).length() < 1e-5);
+        assert!((s.world_matrix(sword).transform_point3(Vec3::ZERO) - Vec3::Y).length() < 1e-5);
+        // Bend the lower bone 90 degrees about Z (with some twist): the sword moves to -X and twists along.
+        let q = Quat::from_rotation_z(90f32.to_radians()) * Quat::from_rotation_y(40f32.to_radians());
+        s.objects.get_mut(&id).unwrap().pose.insert(lower, BonePose { rotation: q, ..Default::default() });
+        let posed = pose_scene(&s, &[]);
+        let (posed_frame, _) = s.objects[&id].skeleton.as_ref().unwrap().world_matrices(&s.objects[&id].pose)[&lower];
+        let want = s.world_matrix(id) * posed_frame * Mat4::from_translation(Vec3::Y);
+        let got = posed.world_matrix(sword);
+        assert!(got.abs_diff_eq(want, 1e-4), "{got} vs {want}");
+        assert!((got.transform_point3(Vec3::ZERO) - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-4);
     }
 
     #[test]

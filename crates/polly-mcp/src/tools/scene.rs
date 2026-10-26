@@ -137,6 +137,9 @@ pub fn object_summary(scene: &Scene, id: u32) -> serde_json::Value {
     if let Some(b) = o.skin {
         j["skinned_to"] = json!(scene.objects.get(&b.armature).map(|a| a.name.clone()));
     }
+    if let (Some(b), Some(p)) = (o.parent_bone, o.parent.and_then(|p| scene.objects.get(&p))) {
+        j["attached_to"] = json!(format!("{} / {}", p.name, p.skeleton.as_ref().map_or("?", |sk| sk.name(b))));
+    }
     if !o.selection.is_empty() {
         j["selection"] = json!({"verts": o.selection.verts.len(), "edges": o.selection.edges.len(), "faces": o.selection.faces.len()});
     }
@@ -304,6 +307,7 @@ fn duplicate_object(ctx: &mut Ctx, a: Duplicate) -> Result<Out> {
         n.transform.translation += Vec3::from_array(a.offset.unwrap_or([0.0; 3]));
         n.parent = o.parent;
         n.skin = o.skin;
+        n.parent_bone = o.parent_bone;
         Ok(id)
     })?;
     Ok(Out::json(object_summary(&ctx.doc.scene, id)))
@@ -800,7 +804,19 @@ fn mirror_object(ctx: &mut Ctx, a: MirrorObject) -> Result<Out> {
             m.offsets.values_mut().for_each(|d| *d *= flip);
         }
         let world = refl * w * local_flip;
-        let parent = o.parent.map(|pid| s.world_matrix(pid)).unwrap_or(Mat4::IDENTITY);
+        // Gear attached to a bone moves to the mirrored bone (forearm.L -> forearm.R).
+        let bone = o.parent_bone.map(|b| {
+            let sk = o.parent.and_then(|p| s.objects.get(&p)).and_then(|p| p.skeleton.as_ref());
+            sk.and_then(|sk| {
+                let name = mirror_name(sk.name(b));
+                sk.bones.iter().find(|(_, x)| x.name == name).map(|(id, _)| *id)
+            })
+            .unwrap_or(b)
+        });
+        let frame = bone
+            .and_then(|b| o.parent.and_then(|p| s.objects.get(&p)).and_then(|p| p.skeleton.as_ref()).and_then(|sk| sk.bones.get(&b)))
+            .map_or(Mat4::IDENTITY, |b| b.rest_matrix());
+        let parent = o.parent.map(|pid| s.world_matrix(pid)).unwrap_or(Mat4::IDENTITY) * frame;
         let (sc, r, t) = (parent.inverse() * world).to_scale_rotation_translation();
         let name = a.name.clone().unwrap_or_else(|| mirror_name(&o.name));
         let nid = s.add_object(&name, mesh);
@@ -809,6 +825,7 @@ fn mirror_object(ctx: &mut Ctx, a: MirrorObject) -> Result<Out> {
         n.parent = o.parent;
         n.morph_weights = o.morph_weights.clone();
         n.skin = o.skin;
+        n.parent_bone = bone;
         if let Some(sk) = o.skin.and_then(|b| s.objects.get(&b.armature)).and_then(|a| a.skeleton.clone()) {
             // Gear bound to a symmetric rig: weights move to the mirrored bones (hand.L -> hand.R).
             let swap: std::collections::BTreeMap<u32, u32> = sk
