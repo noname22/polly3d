@@ -42,11 +42,14 @@ Workflow that works well
    - Organic shaping: move/rotate/scale with `falloff` (soft selection; `connected: true` to leave nearby separate parts alone).
    - Single-sided sheets (hair, cloth, leaves): solidify to give them thickness.
    - Symmetric parts: build one side, then mirror_object for the other (names swap .L/.R), or mirror for a symmetric single mesh.
+   - Scripted geometry: compute it in a script and pass a file (add_mesh `path`, .obj or .json) instead of pasting numbers; export_mesh writes any object (with vertex/face ids) for scripts to read. Both avoid list_* row limits.
 4. UV: mark seams (or auto_seams), unwrap with a small texture size (e.g. 64x64) and pixel snapping; inspect with render_uv_layout.
+   - Tubes (sleeves, legs, torsos): cut where it's least visible with seam_plane (centre back, inner leg) or seam_path through a few waypoint vertices, rather than relying on auto_seams.
 5. Paint: create_texture (optionally palette-locked), assign it through a material, fill_faces / draw / paint_stroke, check render.
    - unwrap/pack_uvs `density` gives important parts more texels ({"head": 2}).
    - fill_faces with {"type":"noise3d"} for organic surfaces (no seams); stamp for buttons/eyes/rivets sized in metres; paint_stroke "dabs" + "mirror" for symmetric details.
-   - Finish with bake_shading (ao and/or height) for depth; use dither on palette-locked textures.
+   - noise3d picks hard bands of its colours (retro); for subtle cloth/skin mottling use close shades with `smooth: true` and contrast < 1.
+   - Finish with bake_shading (ao and/or height) for depth; use dither on palette-locked textures. occluders "scene" uses the default gear loadout; shadows of swappable gear stay in the texture when it is swapped, so bake those textures with occluders that are always present.
 6. save_project, export_glb.
 
 Rigging & animation (optional)

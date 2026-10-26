@@ -342,7 +342,7 @@ struct ConnectVerts {
     path: Vec<String>,
 }
 
-fn vert_ids(path: &[String]) -> Result<Vec<u32>> {
+pub(crate) fn vert_ids(path: &[String]) -> Result<Vec<u32>> {
     path.iter()
         .map(|s| match polly_core::ids::parse(s)? {
             polly_core::ids::Element::Vert(v) => Ok(v),

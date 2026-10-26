@@ -30,7 +30,7 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         def(
             "add_mesh",
-            "Add a new object from raw geometry: a vertex list and faces as vertex-index loops (counter-clockwise seen from outside). Useful for custom shapes.",
+            "Add a new object from raw geometry: a vertex list and faces as vertex-index loops (counter-clockwise seen from outside), inline or from a file (`path`: .obj, or .json with the same `vertices`/`faces` plus optional per-face `uvs`, `parts`, `smooth`; the format export_mesh writes). Prefer a file for large or script-generated meshes.",
             false,
             add_mesh,
         ),
@@ -269,23 +269,29 @@ fn add_primitive(ctx: &mut Ctx, a: AddPrimitive) -> Result<Out> {
 #[derive(Deserialize, JsonSchema)]
 struct AddMesh {
     name: String,
+    #[serde(default)]
     vertices: Vec<[f32; 3]>,
     /// Each face is a loop of indices into `vertices`, CCW seen from outside.
+    #[serde(default)]
     faces: Vec<Vec<usize>>,
+    /// Read the geometry from a .obj or .json file instead (relative to the server's working directory).
+    path: Option<String>,
     position: Option<[f32; 3]>,
     parent: Option<String>,
 }
 
 fn add_mesh(ctx: &mut Ctx, a: AddMesh) -> Result<Out> {
-    let mut m = Mesh::new();
-    let ids: Vec<_> = a.vertices.iter().map(|p| m.add_vert(Vec3::from_array(*p))).collect();
-    for (i, f) in a.faces.iter().enumerate() {
-        let verts = f
-            .iter()
-            .map(|k| ids.get(*k).copied().ok_or_else(|| anyhow::anyhow!("face {i}: vertex index {k} out of range")))
-            .collect::<Result<Vec<_>>>()?;
-        m.add_face(verts).map_err(|e| anyhow::anyhow!("face {i}: {e}"))?;
-    }
+    use polly_export::meshio;
+    let data = match &a.path {
+        Some(p) => {
+            if !a.vertices.is_empty() || !a.faces.is_empty() {
+                anyhow::bail!("give either `path` or inline `vertices`/`faces`, not both");
+            }
+            meshio::read_mesh_file(std::path::Path::new(p))?
+        }
+        None => meshio::MeshData { vertices: a.vertices.clone(), faces: a.faces.clone(), ..Default::default() },
+    };
+    let m = meshio::mesh_from_data(&data)?;
     add_object(ctx, &a.name, m, a.position, None, None, &a.parent)
 }
 

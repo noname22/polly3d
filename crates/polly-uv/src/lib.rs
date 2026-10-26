@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 pub use pack::{PackOptions, pack};
 pub use project::{Projection, project};
 pub use report::{IslandInfo, UvReport, report};
-pub use seams::{auto_seams, islands, mark_seams, uv_islands};
+pub use seams::{auto_seams, islands, mark_seams, plane_seams, shortest_path, uv_islands};
 pub use unwrap::{UnwrapMethod, UnwrapOptions, unwrap};
 
 /// Affine edit of existing UVs: scale and rotate about `pivot`, then translate.

@@ -611,20 +611,33 @@ struct BakeShading {
     texture: Option<String>,
     #[serde(flatten)]
     shading: polly_paint::Shading,
-    /// What casts occlusion: "self" (default) or "scene" (all visible objects).
-    occluders: Option<String>,
+    /// What casts occlusion: "self" (default), "scene" (all visible objects, with gear slots at
+    /// their default variants unless `variants` says otherwise), or a list of object names.
+    occluders: Option<Occluders>,
+    /// Gear loadout for "scene" occluders: {slot: variant}; other slots use their default variant.
+    variants: Option<std::collections::BTreeMap<String, String>>,
     /// Extend shading this many texels past UV island edges (default 1).
     grow_px: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum Occluders {
+    /// "self" or "scene".
+    Mode(String),
+    /// These objects (and the baked object itself).
+    Objects(Vec<String>),
 }
 
 fn bake_shading(ctx: &mut Ctx, a: BakeShading) -> Result<Out> {
     if a.shading.ao.is_none() && a.shading.height.is_none() {
         bail!("give ao (e.g. {{\"ao\":{{}}}}) and/or height (e.g. {{\"height\":{{}}}})");
     }
-    let shown = polly_core::variants::display(&ctx.doc.scene, &[], &Default::default());
     let s = &ctx.doc.scene;
     let id = resolve(s, &a.object)?;
-    let mesh = shown.objects[&id].mesh.clone();
+    // The baked object whole (no parts hidden by variants), in its static pose.
+    let posed = polly_core::anim::pose_scene(s, &[]);
+    let mesh = posed.objects[&id].mesh.clone();
     let tid = match &a.texture {
         Some(t) => s.resolve_texture(t)?,
         None => texture_of_faces(s, id, &mesh.faces.keys().copied().collect())?,
@@ -638,17 +651,37 @@ fn bake_shading(ctx: &mut Ctx, a: BakeShading) -> Result<Out> {
     }
     // Occluders in the object's local space.
     let mut occ = (*mesh).clone();
-    match a.occluders.as_deref().unwrap_or("self") {
-        "self" => {}
-        "scene" => {
-            let inv = shown.world_matrix(id).inverse();
-            for (oid, o) in shown.objects.iter().filter(|(oid, o)| **oid != id && o.visible) {
-                let mut m = (*o.mesh).clone();
-                m.transform(inv * shown.world_matrix(*oid));
-                occ.append(&m);
-            }
+    let others: Vec<u32> = match &a.occluders {
+        None => vec![],
+        Some(Occluders::Mode(m)) if m == "self" || m == "scene" => vec![],
+        Some(Occluders::Mode(other)) => bail!("occluders must be \"self\", \"scene\" or a list of objects, not '{other}'"),
+        Some(Occluders::Objects(names)) => names.iter().map(|n| s.resolve(Some(n))).collect::<polly_core::Result<_>>()?,
+    };
+    let scene_mode = matches!(&a.occluders, Some(Occluders::Mode(m)) if m == "scene");
+    if a.variants.is_some() && !scene_mode {
+        bail!("`variants` only applies with occluders \"scene\"");
+    }
+    // Default loadout, overridden by `variants`.
+    let mut choice: std::collections::BTreeMap<String, String> = s.slots.iter().map(|(n, sl)| (n.clone(), sl.default.clone())).collect();
+    choice.extend(super::variants::choice(s, &a.variants)?);
+    let shown = polly_core::variants::display(s, &[], &choice);
+    let occluders: Vec<u32> = if scene_mode {
+        shown.objects.iter().filter(|(oid, o)| **oid != id && o.visible).map(|(oid, _)| *oid).collect()
+    } else {
+        others.into_iter().filter(|o| *o != id).collect()
+    };
+    let inv = posed.world_matrix(id).inverse();
+    let mut swappable = Vec::new();
+    for oid in &occluders {
+        // Explicit occluders are used whole, even if hidden or not chosen.
+        let src = if scene_mode { &shown } else { &posed };
+        let o = &src.objects[oid];
+        let mut m = (*o.mesh).clone();
+        m.transform(inv * src.world_matrix(*oid));
+        occ.append(&m);
+        if let Some((slot, v)) = s.variant_of(*oid) {
+            swappable.push(format!("{} (slot '{slot}', variant '{v}')", o.name));
         }
-        other => bail!("occluders must be \"self\" or \"scene\", not '{other}'"),
     }
     let bvh = polly_core::bvh::Bvh::new(&occ, polly_core::glam::Mat4::IDENTITY);
     let (w, h) = (s.textures[&tid].width, s.textures[&tid].height);
@@ -658,5 +691,14 @@ fn bake_shading(ctx: &mut Ctx, a: BakeShading) -> Result<Out> {
         polly_paint::bake_shading(t, &map, &bvh, &a.shading, &p)
     })?;
     out.json["faces"] = json!(faces.len());
+    if !occluders.is_empty() {
+        out.json["occluders"] = json!(occluders.iter().map(|o| ctx.doc.scene.objects[o].name.clone()).collect::<Vec<_>>());
+    }
+    if !swappable.is_empty() {
+        out.json["warning"] = json!(format!(
+            "baked shadows from swappable gear: {}. They stay in the texture when that gear is swapped out; bake with occluders that are always present, or one texture per loadout.",
+            swappable.join(", ")
+        ));
+    }
     Ok(out)
 }

@@ -171,3 +171,73 @@ fn cut_graph(mesh: &Mesh, chart: &Chart) -> Vec<Edge> {
     }
     free.into_iter().collect()
 }
+
+/// Edges of the shortest path (by length) from `a` to `b` along mesh edges.
+pub fn shortest_path(mesh: &Mesh, a: VertId, b: VertId) -> Option<Vec<Edge>> {
+    let mut adj: HashMap<VertId, Vec<(VertId, f32)>> = HashMap::new();
+    for e in mesh.edges() {
+        let len = mesh.verts[&e.0].pos.distance(mesh.verts[&e.1].pos);
+        adj.entry(e.0).or_default().push((e.1, len));
+        adj.entry(e.1).or_default().push((e.0, len));
+    }
+    let mut dist: HashMap<VertId, f32> = HashMap::from([(a, 0.0)]);
+    let mut prev: HashMap<VertId, VertId> = HashMap::new();
+    // Non-negative f32 bits sort like the values.
+    let mut heap = BinaryHeap::from([Reverse((0u32, a))]);
+    while let Some(Reverse((d, v))) = heap.pop() {
+        let d = f32::from_bits(d);
+        if v == b {
+            break;
+        }
+        if d > dist[&v] {
+            continue;
+        }
+        for &(n, len) in adj.get(&v).into_iter().flatten() {
+            let nd = d + len;
+            if dist.get(&n).is_none_or(|old| nd < *old) {
+                dist.insert(n, nd);
+                prev.insert(n, v);
+                heap.push(Reverse((nd.to_bits(), n)));
+            }
+        }
+    }
+    if a != b && !prev.contains_key(&b) {
+        return None;
+    }
+    let mut path = Vec::new();
+    let mut v = b;
+    while v != a {
+        let p = prev[&v];
+        path.push(Edge::new(p, v));
+        v = p;
+    }
+    path.reverse();
+    Some(path)
+}
+
+/// Edges where `faces` cross a plane: those between a face whose centre is in
+/// front of the plane and one behind it. With `within` (point, normal), only
+/// edges whose midpoint is on its positive side, e.g. the back half for a
+/// centre-back seam.
+pub fn plane_seams(
+    mesh: &Mesh,
+    faces: &BTreeSet<FaceId>,
+    point: polly_core::glam::Vec3,
+    normal: polly_core::glam::Vec3,
+    within: Option<(polly_core::glam::Vec3, polly_core::glam::Vec3)>,
+) -> BTreeSet<Edge> {
+    let n = normal.normalize_or_zero();
+    let front = |f: &FaceId| (mesh.face_center(&mesh.faces[f]) - point).dot(n) > 0.0;
+    let mut out = BTreeSet::new();
+    for (e, fs) in mesh.edge_faces() {
+        let fs: Vec<_> = fs.into_iter().filter(|f| faces.contains(f)).collect();
+        if fs.len() < 2 || fs.iter().all(front) || !fs.iter().any(front) {
+            continue;
+        }
+        let mid = (mesh.verts[&e.0].pos + mesh.verts[&e.1].pos) * 0.5;
+        if within.is_none_or(|(p, wn)| (mid - p).dot(wn) >= 0.0) {
+            out.insert(e);
+        }
+    }
+    out
+}

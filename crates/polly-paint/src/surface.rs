@@ -135,7 +135,10 @@ pub fn fbm3(seed: u64, p: Vec3, octaves: u32) -> f32 {
 /// Options for [`noise3d`].
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Noise3d {
-    /// Colours from dark/low to light/high; the noise picks bands among them.
+    /// Colours from dark/low to light/high; the noise picks bands among them
+    /// (or blends between them with `smooth`). Hard bands of clearly different
+    /// colours read as camouflage; for subtle fabric or skin mottling use close
+    /// shades, `smooth: true` and contrast below 1.
     pub colors: Vec<Rgba>,
     /// Feature size in world units (e.g. 0.1 = blotches about 10 cm across).
     pub scale: f32,
@@ -150,6 +153,9 @@ pub struct Noise3d {
     /// Ordered dithering at band boundaries (retro), default none.
     #[serde(default)]
     pub dither: Dither,
+    /// Blend smoothly between neighbouring colours instead of hard bands (default false).
+    #[serde(default)]
+    pub smooth: bool,
 }
 
 fn two() -> u32 {
@@ -171,6 +177,12 @@ pub fn noise3d(tex: &mut Texture, map: &SurfaceMap, n: &Noise3d, p: &Paint) -> u
         let s = map.get(x, y)?;
         let v = fbm3(n.seed, s.pos * inv, n.octaves);
         let v = (0.5 + (v - 0.5) * n.contrast).clamp(0.0, 0.9999);
+        if n.smooth {
+            let t = v * (k - 1.0);
+            let (i, f) = (t.floor() as usize, t.fract());
+            let (a, b) = (n.colors[i.min(n.colors.len() - 1)], n.colors[(i + 1).min(n.colors.len() - 1)]);
+            return Some(std::array::from_fn(|c| (a[c] as f32 + (b[c] as f32 - a[c] as f32) * f).round() as u8));
+        }
         let t = v * k;
         let (i, frac) = (t.floor(), t.fract());
         let mut idx = i as usize;
@@ -328,6 +340,21 @@ mod tests {
             }
         }
         m
+    }
+
+    #[test]
+    fn smooth_noise_blends_between_colours() {
+        let m = atlas_cube();
+        let all: BTreeSet<_> = m.faces.keys().copied().collect();
+        let map = SurfaceMap::new(&m, &all, 48, 32, 0);
+        let colours = |smooth: bool| {
+            let mut t = Texture::new("t", 48, 32, [0, 0, 0, 255]);
+            let n = Noise3d { colors: vec![[0, 0, 0, 255], [200, 200, 200, 255]], scale: 0.3, octaves: 2, contrast: 1.0, seed: 1, dither: Dither::None, smooth };
+            noise3d(&mut t, &map, &n, &Paint::default());
+            t.pixels.chunks(4).map(|c| c[0]).collect::<BTreeSet<u8>>()
+        };
+        assert_eq!(colours(false), BTreeSet::from([0, 200]), "bands: only the given colours");
+        assert!(colours(true).len() > 10, "smooth: shades in between");
     }
 
     #[test]

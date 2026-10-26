@@ -16,6 +16,18 @@ pub fn tools() -> Vec<ToolDef> {
     vec![
         def("mark_seams", "Mark (or clear) UV seams on edges. Faces/verts given are converted to their edges.", false, mark_seams),
         def(
+            "seam_path",
+            "Mark (or clear) a seam along the shortest edge path through the given vertices in order, e.g. [\"v12\", \"v40\", \"v77\"] from the armpit down the inside of a sleeve. Waypoints keep the path where you want it.",
+            false,
+            seam_path,
+        ),
+        def(
+            "seam_plane",
+            "Mark (or clear) seams where the mesh crosses a plane: the edges between faces whose centres lie on opposite sides. Good for least-visible cuts on tube shapes: centre back (plane x=0, `within` the back half: point [0,0,0] normal [0,0,-1]), inner leg, under the arm. `within` (a half-space) keeps only part of the crossing.",
+            false,
+            seam_plane,
+        ),
+        def(
             "auto_seams",
             "Mark seams on edges sharper than an angle, plus whatever extra cuts make every chart unwrappable (cylinders, spheres, tori).",
             false,
@@ -79,6 +91,86 @@ fn mark_seams(ctx: &mut Ctx, a: Seams) -> Result<Out> {
         polly_uv::mark_seams(m, &e, a.on);
         Ok(Default::default())
     })
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SeamPath {
+    object: Option<String>,
+    /// Two or more vertex ids; the path goes through them in order.
+    verts: Vec<String>,
+    /// Close the path back to the first vertex.
+    #[serde(default)]
+    closed: bool,
+    #[serde(default = "yes")]
+    on: bool,
+}
+
+fn seam_path(ctx: &mut Ctx, a: SeamPath) -> Result<Out> {
+    let mut vs = super::edit::vert_ids(&a.verts)?;
+    if vs.len() < 2 {
+        anyhow::bail!("give at least two vertices");
+    }
+    if a.closed {
+        vs.push(vs[0]);
+    }
+    let mut n = 0;
+    let mut out = edit_mesh(ctx, &a.object, None, "seam path", |m, _| {
+        let mut edges = BTreeSet::new();
+        for w in vs.windows(2) {
+            for v in w {
+                if !m.verts.contains_key(v) {
+                    return Err(polly_core::Error::Invalid(format!("no vertex v{v}")));
+                }
+            }
+            let path = polly_uv::shortest_path(m, w[0], w[1])
+                .ok_or_else(|| polly_core::Error::Invalid(format!("v{} and v{} are not connected", w[0], w[1])))?;
+            edges.extend(path);
+        }
+        n = edges.len();
+        polly_uv::mark_seams(m, &edges, a.on);
+        Ok(Default::default())
+    })?;
+    out.json["seam_edges"] = json!(n);
+    Ok(out)
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct HalfSpace {
+    point: [f32; 3],
+    normal: [f32; 3],
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SeamPlane {
+    object: Option<String>,
+    /// Faces to consider (default all).
+    elements: Option<Vec<String>>,
+    /// A point on the plane (object space).
+    point: [f32; 3],
+    /// The plane's normal.
+    normal: [f32; 3],
+    /// Only crossing edges on the positive side of this half-space.
+    within: Option<HalfSpace>,
+    #[serde(default = "yes")]
+    on: bool,
+}
+
+fn seam_plane(ctx: &mut Ctx, a: SeamPlane) -> Result<Out> {
+    use polly_core::glam::Vec3;
+    let ids = all_default(&a.elements);
+    let mut n = 0;
+    let within = a.within.as_ref().map(|h| (Vec3::from_array(h.point), Vec3::from_array(h.normal).normalize_or_zero()));
+    let mut out = edit_mesh(ctx, &a.object, Some(&ids), "seam plane", |m, s| {
+        let edges = polly_uv::plane_seams(m, &s.implied_faces(m), Vec3::from_array(a.point), Vec3::from_array(a.normal), within);
+        n = edges.len();
+        polly_uv::mark_seams(m, &edges, a.on);
+        Ok(Default::default())
+    })?;
+    out.json["seam_edges"] = json!(n);
+    if n == 0 {
+        out.json["note"] = json!("the plane crosses no edges between the given faces (check point/normal, or within)");
+    }
+    Ok(out)
 }
 
 #[derive(Deserialize, JsonSchema)]

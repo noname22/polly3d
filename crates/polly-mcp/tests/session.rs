@@ -899,3 +899,77 @@ fn reference_images() {
     call(&s, "remove_reference", json!({"name": "sheet"}));
     assert_eq!(call(&s, "list_references", json!({}))["references"], json!([]));
 }
+
+/// Feedback batch 1: mesh files, region select, seam paths/planes, variant-aware baking.
+#[test]
+fn files_seams_and_baking() {
+    let s = server();
+    let dir = std::env::temp_dir().join(format!("polly-batch1-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |name: &str| dir.join(name).to_str().unwrap().to_string();
+
+    // 1. OBJ in, JSON out (with ids, world space), JSON back in.
+    std::fs::write(dir.join("quad.obj"), "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\ng panel\nf 1/1 2/2 3/3 4/4\n").unwrap();
+    let r = call(&s, "add_mesh", json!({"name": "Quad", "path": p("quad.obj"), "position": [0, 0, 2]}));
+    assert_eq!(r["faces"], 1, "{r}");
+    call(&s, "export_mesh", json!({"object": "Quad", "path": p("quad.json"), "space": "world"}));
+    let j: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("quad.json")).unwrap()).unwrap();
+    assert_eq!(j["vertices"][2], json!([1.0, 1.0, 2.0]));
+    assert_eq!(j["parts"], json!(["panel"]));
+    assert_eq!(j["uvs"][0][0], json!([0.0, 1.0]), "OBJ v is flipped to Polly's downward v");
+    assert_eq!(j["vertex_ids"].as_array().unwrap().len(), 4);
+    call(&s, "add_mesh", json!({"name": "Quad2", "path": p("quad.json")}));
+    call(&s, "export_mesh", json!({"object": "Quad2", "path": p("quad2.obj")}));
+    assert!(std::fs::read_to_string(dir.join("quad2.obj")).unwrap().contains("g panel"));
+    call_err(&s, "add_mesh", json!({"name": "X", "path": p("quad.json"), "vertices": [[0, 0, 0]]}));
+
+    // 2. A box selects the vertices inside it, not every vertex of faces centred in it.
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [2, 2, 2]}, "name": "Cube"}));
+    let r = call(&s, "select", json!({"object": "Cube", "query": {"by": "box", "min": [0.9, -0.5, -2], "max": [2, 2, 2]}, "kind": "verts"}));
+    assert_eq!(r["selection"]["counts"]["verts"], 2, "{r}");
+    let sel_verts = |s: &polly_mcp::PollyServer| {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let o = g.doc.scene.objects.values().find(|o| o.name == "Cube").unwrap();
+        o.selection.verts.iter().map(|v| o.mesh.verts[v].pos).collect::<Vec<_>>()
+    };
+    let vs = sel_verts(&s);
+    assert_eq!(vs.len(), 2, "{vs:?}");
+    assert!(vs.iter().all(|p| p.x > 0.9 && p.y > 0.9));
+
+    // 3. Seam along the shortest path between opposite cube corners: 3 edges.
+    call(&s, "export_mesh", json!({"object": "Cube", "path": p("cube.json")}));
+    let c: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("cube.json")).unwrap()).unwrap();
+    let id_at = |want: [f64; 3]| {
+        let i = c["vertices"].as_array().unwrap().iter().position(|v| (0..3).all(|k| (v[k].as_f64().unwrap() - want[k]).abs() < 1e-5)).unwrap();
+        format!("v{}", c["vertex_ids"][i])
+    };
+    let r = call(&s, "seam_path", json!({"object": "Cube", "verts": [id_at([-1.0, -1.0, -1.0]), id_at([1.0, 1.0, 1.0])]}));
+    assert_eq!(r["seam_edges"], 3, "{r}");
+
+    // 4. Plane seam down the back of an open tube.
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "segments": 8, "caps": false}, "name": "Tube"}));
+    let r = call(&s, "seam_plane", json!({"object": "Tube", "point": [0, 0, 0], "normal": [1, 0, 0], "within": {"point": [0, 0, 0], "normal": [0, 0, -1]}}));
+    assert_eq!(r["seam_edges"], 1, "{r}");
+    let r = call(&s, "seam_plane", json!({"object": "Tube", "point": [0, 0, 0], "normal": [1, 0, 0]}));
+    assert_eq!(r["seam_edges"], 2, "front and back: {r}");
+
+    // 5. Baking: "scene" occluders use the default loadout; swappable occluders warn.
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.6, 1.0, 0.4]}, "name": "Body", "position": [5, 0, 0]}));
+    call(&s, "auto_seams", json!({"object": "Body"}));
+    call(&s, "unwrap", json!({"object": "Body"}));
+    call(&s, "create_texture", json!({"name": "BodyTex", "width": 32, "height": 32, "fill": "#c0a080", "material": "BodyMat", "object": "Body"}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.8, 0.6, 0.6]}, "name": "Blazer", "position": [5, 0.1, 0]}));
+    call(&s, "add_variant", json!({"slot": "top", "variant": "none"}));
+    call(&s, "add_variant", json!({"slot": "top", "variant": "blazer", "objects": ["Blazer"]}));
+    call(&s, "set_variant", json!({"slot": "top", "variant": "blazer"}));
+    let r = call(&s, "bake_shading", json!({"object": "Body", "ao": {"samples": 4}, "occluders": "scene"}));
+    let occ = r["occluders"].to_string();
+    assert!(!occ.contains("Blazer") && r.get("warning").is_none(), "default loadout has no blazer, even though it is active: {r}");
+    let r = call(&s, "bake_shading", json!({"object": "Body", "ao": {"samples": 4}, "occluders": "scene", "variants": {"top": "blazer"}}));
+    assert!(r["occluders"].to_string().contains("Blazer") && r["warning"].as_str().unwrap().contains("swappable"), "{r}");
+    let r = call(&s, "bake_shading", json!({"object": "Body", "ao": {"samples": 4}, "occluders": ["Tube"]}));
+    assert_eq!(r["occluders"], json!(["Tube"]));
+    call_err(&s, "bake_shading", json!({"object": "Body", "ao": {}, "occluders": "self", "variants": {"top": "none"}}));
+    std::fs::remove_dir_all(&dir).ok();
+}

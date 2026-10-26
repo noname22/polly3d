@@ -1,4 +1,5 @@
 pub mod glb;
+pub mod meshio;
 
 use anyhow::{Context, Result, bail};
 use polly_core::scene::{Scene, Texture};

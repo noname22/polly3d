@@ -19,7 +19,43 @@ pub fn tools() -> Vec<ToolDef> {
             true,
             export,
         ),
+        def(
+            "export_mesh",
+            "Write an object's geometry to a .obj or .json file for scripts: vertices, faces (index loops), per-face uvs/parts/smooth, and in JSON the Polly ids of each row (vertex_ids, face_ids) to refer back to elements. No row limits, unlike list_verts. add_mesh reads the same files.",
+            true,
+            export_mesh,
+        ),
     ]
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ExportMesh {
+    /// Object name or id (default: active object).
+    object: Option<String>,
+    /// .obj or .json file.
+    path: String,
+    /// "object" (default: the mesh's own coordinates) or "world" (with its transform and parents).
+    space: Option<String>,
+}
+
+fn export_mesh(ctx: &mut Ctx, a: ExportMesh) -> Result<Out> {
+    use polly_export::meshio;
+    let s = &ctx.doc.scene;
+    let id = s.resolve(a.object.as_deref())?;
+    let o = s.object(id)?;
+    let xform = match a.space.as_deref().unwrap_or("object") {
+        "object" => polly_core::glam::Mat4::IDENTITY,
+        "world" => s.world_matrix(id),
+        other => anyhow::bail!("unknown space '{other}' (object, world)"),
+    };
+    let data = meshio::data_from_mesh(&o.mesh, xform);
+    let path = PathBuf::from(&a.path);
+    meshio::write_mesh_file(&path, &data, &o.name)?;
+    Ok(Out::json(json!({
+        "result": format!("wrote {}", std::path::absolute(&path)?.display()),
+        "vertices": data.vertices.len(),
+        "faces": data.faces.len(),
+    })))
 }
 
 #[derive(Deserialize, JsonSchema)]

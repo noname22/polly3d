@@ -237,7 +237,15 @@ fn select(ctx: &mut Ctx, a: SelectArgs) -> Result<Out> {
     let o = ctx.doc.scene.object(id)?;
     let mut s = run(&o.mesh, &a.query, &o.selection)?;
     if let Some(k) = &a.kind {
-        s = convert(&o.mesh, &s, k)?;
+        // Region queries test vertex positions themselves: their vertex and
+        // edge sets are exact, while converting from their faces would add
+        // vertices outside the region.
+        let region = matches!(a.query, Query::Box { .. } | Query::PlaneSide { .. });
+        s = match k.as_str() {
+            "verts" | "vertices" if region => Selection { verts: s.verts, ..Default::default() },
+            "edges" if region => Selection { edges: s.edges, ..Default::default() },
+            _ => convert(&o.mesh, &s, k)?,
+        };
     }
     let mut cur = o.selection.clone();
     let new = match a.mode.as_deref().unwrap_or("replace") {
