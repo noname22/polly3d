@@ -74,5 +74,14 @@ fn export(ctx: &mut Ctx, a: Export) -> Result<Out> {
         path.set_extension("glb");
     }
     std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
-    Ok(ok(format!("exported {} ({} bytes)", std::path::absolute(&path)?.display(), bytes.len())))
+    let msg = format!("exported {} ({} bytes)", std::path::absolute(&path)?.display(), bytes.len());
+    // Shared-armature skins are not exported yet (planned): say so instead of failing silently.
+    let bound: Vec<&str> = ctx.doc.scene.objects.values().filter(|o| o.skin.is_some()).map(|o| o.name.as_str()).collect();
+    if bound.is_empty() {
+        return Ok(ok(msg));
+    }
+    Ok(Out::json(json!({
+        "result": msg,
+        "warning": format!("not yet supported: meshes bound to an armature export unskinned, in their rest pose: {}", bound.join(", ")),
+    })))
 }

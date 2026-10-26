@@ -63,6 +63,16 @@ pub struct Object {
     /// A morph target being edited, if any.
     #[serde(default)]
     pub morph_edit: Option<crate::anim::MorphEdit>,
+    /// Skinned to another object's skeleton (an armature) instead of its own:
+    /// skin weights refer to the armature's bones, and the armature's pose and
+    /// clips deform this mesh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skin: Option<SkinBinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkinBinding {
+    pub armature: ObjectId,
 }
 
 fn yes() -> bool {
@@ -210,6 +220,7 @@ impl Scene {
                 pose: BTreeMap::new(),
                 morph_weights: BTreeMap::new(),
                 morph_edit: None,
+                skin: None,
             },
         );
         self.active = Some(id);
@@ -258,11 +269,32 @@ impl Scene {
             if other.parent == Some(id) {
                 other.parent = o.parent;
             }
+            if other.skin.is_some_and(|s| s.armature == id) {
+                other.skin = None;
+            }
         }
         if self.active == Some(id) {
             self.active = self.objects.keys().next().copied();
         }
         Ok(o)
+    }
+
+    /// The object whose skeleton deforms `id`: its armature if bound, itself
+    /// if it has its own skeleton.
+    pub fn skeleton_source(&self, id: ObjectId) -> Option<ObjectId> {
+        let o = self.objects.get(&id)?;
+        match o.skin {
+            Some(b) => self.objects.get(&b.armature).filter(|a| a.skeleton.is_some()).map(|_| b.armature),
+            None => o.skeleton.as_ref().map(|_| id),
+        }
+    }
+
+    /// Transform from `id`'s local space into the space of its skeleton source.
+    pub fn to_skeleton_space(&self, id: ObjectId) -> Mat4 {
+        match self.skeleton_source(id) {
+            Some(src) if src != id => self.world_matrix(src).inverse() * self.world_matrix(id),
+            _ => Mat4::IDENTITY,
+        }
     }
 
     pub fn world_matrix(&self, id: ObjectId) -> Mat4 {

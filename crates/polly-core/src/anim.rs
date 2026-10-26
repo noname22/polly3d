@@ -263,11 +263,23 @@ fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
 
 /// Compute weights for `verts` from distances to `bones` (replacing existing weights of those verts).
 pub fn auto_weights(mesh: &mut Mesh, skeleton: &Skeleton, verts: &BTreeSet<VertId>, bones: &BTreeSet<BoneId>, mode: AutoWeights) -> Result<()> {
+    auto_weights_in(mesh, skeleton, verts, bones, mode, Mat4::IDENTITY)
+}
+
+/// [`auto_weights`] for a mesh whose local space maps into the skeleton's by `to_skel`.
+pub fn auto_weights_in(
+    mesh: &mut Mesh,
+    skeleton: &Skeleton,
+    verts: &BTreeSet<VertId>,
+    bones: &BTreeSet<BoneId>,
+    mode: AutoWeights,
+    to_skel: Mat4,
+) -> Result<()> {
     if bones.is_empty() {
         return invalid("no bones to weight to");
     }
     for v in verts {
-        let p = mesh.pos(*v);
+        let p = to_skel.transform_point3(mesh.pos(*v));
         let mut d: Vec<(BoneId, f32)> =
             bones.iter().map(|b| (*b, segment_distance(p, skeleton.bones[b].head, skeleton.bones[b].tail))).collect();
         d.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -552,8 +564,9 @@ fn blend(base: Vec4, contribs: &[(Vec4, f32)], rotation: bool) -> Vec4 {
 }
 
 /// Display copy of the scene with clips applied at the given times and
-/// weights, static poses and morph weights applied, meshes deformed and bones
-/// moved to their posed positions.
+/// weights, static poses and morph weights applied, meshes deformed (by their
+/// own skeleton or the armature they are bound to) and bones moved to their
+/// posed positions.
 pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
     // Gather channel contributions per target.
     let mut contribs: BTreeMap<Target, Vec<(Vec4, f32)>> = BTreeMap::new();
@@ -569,16 +582,17 @@ pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
             }
         }
     }
+    let get = |t: Target, base: Vec4| contribs.get(&t).map_or(base, |c| blend(base, c, t.is_rotation()));
     let mut out = scene.clone();
+    // Pass 1: object transforms, morph weights and skeleton poses.
+    let mut poses: BTreeMap<ObjectId, BTreeMap<BoneId, BonePose>> = BTreeMap::new();
+    let mut morphs: BTreeMap<ObjectId, Vec<f32>> = BTreeMap::new();
     for (&id, o) in out.objects.iter_mut() {
-        let get = |t: Target, base: Vec4| contribs.get(&t).map_or(base, |c| blend(base, c, t.is_rotation()));
-        // Object transform.
         let tr = &mut o.transform;
         tr.translation = get(Target::ObjectTranslation { object: id }, tr.translation.extend(0.0)).truncate();
         tr.rotation = Quat::from_vec4(get(Target::ObjectRotation { object: id }, Vec4::from(tr.rotation))).normalize();
         tr.scale = get(Target::ObjectScale { object: id }, tr.scale.extend(0.0)).truncate();
-        // Morph weights.
-        let mut morph_w: Vec<f32> = o
+        let morph_w: Vec<f32> = o
             .mesh
             .morphs
             .iter()
@@ -587,12 +601,9 @@ pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
                 get(Target::MorphWeight { object: id, morph: m.name.clone() }, Vec4::new(base, 0.0, 0.0, 0.0)).x
             })
             .collect();
-        if o.mesh.morphs.is_empty() {
-            morph_w.clear();
-        }
-        // Bone pose.
-        let mut pose = o.pose.clone();
+        morphs.insert(id, morph_w);
         if let Some(sk) = &o.skeleton {
+            let mut pose = o.pose.clone();
             for &b in sk.bones.keys() {
                 let cur = pose.get(&b).copied().unwrap_or_default();
                 let p = BonePose {
@@ -600,26 +611,42 @@ pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
                     rotation: Quat::from_vec4(get(Target::BoneRotation { object: id, bone: b }, Vec4::from(cur.rotation))).normalize(),
                     scale: get(Target::BoneScale { object: id, bone: b }, cur.scale.extend(0.0)).truncate(),
                 };
-                if !p.is_rest() {
+                if p.is_rest() {
+                    pose.remove(&b);
+                } else {
                     pose.insert(b, p);
                 }
             }
+            poses.insert(id, pose);
         }
-        let skinned = o.skeleton.is_some() && !pose.is_empty() && !o.mesh.weights.is_empty();
+    }
+    // Pass 2: deform meshes with their skeleton source (rest skeletons, posed transforms).
+    let ids: Vec<ObjectId> = out.objects.keys().copied().collect();
+    for id in ids {
+        let src = out.skeleton_source(id);
+        let pose = src.and_then(|s| poses.get(&s)).filter(|p| !p.is_empty());
+        let o = &out.objects[&id];
+        let morph_w = &morphs[&id];
+        let skinned = pose.is_some() && !o.mesh.weights.is_empty();
         if morph_w.iter().any(|w| w.abs() > 1e-6) || skinned {
-            let mesh = deform(&o.mesh, o.skeleton.as_ref(), &pose, &morph_w);
-            o.mesh = Arc::new(mesh);
+            let skel = src.and_then(|s| out.objects[&s].skeleton.as_ref());
+            let empty = BTreeMap::new();
+            let mesh = deform_in(&o.mesh, skel, pose.unwrap_or(&empty), morph_w, out.to_skeleton_space(id));
+            out.objects.get_mut(&id).unwrap().mesh = Arc::new(mesh);
         }
-        if let Some(sk) = &mut o.skeleton {
-            if !pose.is_empty() {
-                let m = sk.world_matrices(&pose);
-                for (b, bone) in sk.bones.iter_mut() {
-                    let (posed, rest) = m[b];
-                    let skin = posed * rest.inverse();
-                    bone.head = skin.transform_point3(bone.head);
-                    bone.tail = skin.transform_point3(bone.tail);
-                }
-            }
+    }
+    // Pass 3: move the bones of posed skeletons in the display copy.
+    for (id, pose) in &poses {
+        if pose.is_empty() {
+            continue;
+        }
+        let sk = out.objects.get_mut(id).unwrap().skeleton.as_mut().unwrap();
+        let m = sk.world_matrices(pose);
+        for (b, bone) in sk.bones.iter_mut() {
+            let (posed, rest) = m[b];
+            let skin = posed * rest.inverse();
+            bone.head = skin.transform_point3(bone.head);
+            bone.tail = skin.transform_point3(bone.tail);
         }
     }
     out
@@ -627,6 +654,17 @@ pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
 
 /// Morph then skin a mesh (positions only; ids, faces and attributes are kept).
 pub fn deform(mesh: &Mesh, skeleton: Option<&Skeleton>, pose: &BTreeMap<BoneId, BonePose>, morph_weights: &[f32]) -> Mesh {
+    deform_in(mesh, skeleton, pose, morph_weights, Mat4::IDENTITY)
+}
+
+/// [`deform`] for a mesh whose local space maps into the skeleton's by `to_skel`.
+pub fn deform_in(
+    mesh: &Mesh,
+    skeleton: Option<&Skeleton>,
+    pose: &BTreeMap<BoneId, BonePose>,
+    morph_weights: &[f32],
+    to_skel: Mat4,
+) -> Mesh {
     let mut m = mesh.clone();
     for (morph, w) in mesh.morphs.iter().zip(morph_weights) {
         if w.abs() < 1e-6 {
@@ -639,8 +677,12 @@ pub fn deform(mesh: &Mesh, skeleton: Option<&Skeleton>, pose: &BTreeMap<BoneId, 
         }
     }
     if let Some(sk) = skeleton {
-        let mats: HashMap<BoneId, Mat4> =
-            sk.world_matrices(pose).into_iter().map(|(b, (posed, rest))| (b, posed * rest.inverse())).collect();
+        let from_skel = to_skel.inverse();
+        let mats: HashMap<BoneId, Mat4> = sk
+            .world_matrices(pose)
+            .into_iter()
+            .map(|(b, (posed, rest))| (b, from_skel * posed * rest.inverse() * to_skel))
+            .collect();
         for (v, list) in &mesh.weights {
             let Some(vert) = m.verts.get_mut(v) else { continue };
             let total: f32 = list.iter().filter(|(b, _)| mats.contains_key(b)).map(|(_, w)| w).sum();
@@ -739,6 +781,60 @@ mod tests {
         assert!((clip.playback_time(0.25) - 0.25).abs() < 1e-6);
         assert!((clip.playback_time(1.75) - 0.75).abs() < 1e-6);
         assert!((clip.playback_time(3.6) - 0.6).abs() < 1e-5);
+    }
+
+    /// A mesh bound to a separate armature deforms exactly like the same mesh
+    /// with its own skeleton, also when the armature is moved and rotated and
+    /// the motion comes from a clip on the armature.
+    #[test]
+    fn bound_mesh_matches_self_bound() {
+        let (reference, rid, _, lower) = arm();
+        let mut s = Scene::default();
+        let o = &reference.objects[&rid];
+        // Armature: skeleton only, placed somewhere else in the world.
+        let arm_id = s.add_object("Rig", Mesh::new());
+        let place = crate::scene::Transform {
+            translation: Vec3::new(3.0, 1.0, -2.0),
+            rotation: Quat::from_rotation_y(0.7),
+            scale: Vec3::ONE,
+        };
+        {
+            let a = s.objects.get_mut(&arm_id).unwrap();
+            a.skeleton = o.skeleton.clone();
+            a.transform = place;
+        }
+        // Skin: same geometry and weights, parented to the armature at identity.
+        let skin_id = s.add_object("Skin", (*o.mesh).clone());
+        {
+            let k = s.objects.get_mut(&skin_id).unwrap();
+            k.skin = Some(crate::scene::SkinBinding { armature: arm_id });
+        }
+        s.set_parent(skin_id, Some(arm_id)).unwrap();
+        let mut c = Clip::new("bend", 1.0, 24.0);
+        c.channel_mut(Target::BoneRotation { object: arm_id, bone: lower })
+            .set_key(0.0, Vec4::from(Quat::from_rotation_z(70f32.to_radians())));
+        let cid = s.add_clip(c);
+        let mut r = reference.clone();
+        r.objects.get_mut(&rid).unwrap().pose.insert(lower, BonePose { rotation: Quat::from_rotation_z(70f32.to_radians()), ..Default::default() });
+
+        let posed = pose_scene(&s, &[ClipPlay { clip: cid, time: 0.0, weight: 1.0 }]);
+        let expect = pose_scene(&r, &[]);
+        let world = posed.world_matrix(skin_id);
+        let pm = &posed.objects[&skin_id].mesh;
+        let em = &expect.objects[&rid].mesh;
+        let mut moved = 0;
+        for (v, e) in &em.verts {
+            let got = world.transform_point3(pm.pos(*v));
+            let want = place.matrix().transform_point3(e.pos);
+            assert!(got.distance(want) < 1e-4, "v{v}: {got} vs {want}");
+            if e.pos.distance(o.mesh.pos(*v)) > 1e-3 {
+                moved += 1;
+            }
+        }
+        assert!(moved > 5, "the pose should actually bend the arm");
+        // Unbinding happens when the armature is deleted.
+        s.remove_object(arm_id).unwrap();
+        assert!(s.objects[&skin_id].skin.is_none());
     }
 
     #[test]

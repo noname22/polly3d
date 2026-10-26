@@ -514,3 +514,69 @@ fn texturing_batch() {
     let t = s.call("get_texture", json!({"texture": "Skin", "scale": 3}));
     std::fs::write(out.join("texturing_tex.png"), &images(&t)[0]).unwrap();
 }
+
+/// Phase 1 of gear support: one armature deforms several bound meshes.
+#[test]
+fn shared_armature() {
+    let s = server();
+    call(&s, "add_mesh", json!({"name": "Rig", "vertices": [], "faces": []}));
+    call(&s, "add_bone_chain", json!({"object": "Rig", "points": [[0, -1, 0], [0, 0, 0], [0, 1, 0]], "names": ["upper", "lower"]}));
+    let cyl = |r: f32| json!({"kind": "cylinder", "radius_bottom": r, "radius_top": r, "height": 2, "segments": 6, "height_segments": 4});
+    call(&s, "add_primitive", json!({"shape": cyl(0.2), "name": "Body"}));
+    call(&s, "add_primitive", json!({"shape": cyl(0.25), "name": "Sleeve"}));
+    for m in ["Body", "Sleeve"] {
+        let r = call(&s, "bind_to_armature", json!({"object": m, "armature": "Rig"}));
+        assert!(r["hint"].as_str().unwrap().contains("auto_weights"), "{r}");
+        call(&s, "auto_weights", json!({"object": m, "method": {"mode": "smooth"}}));
+        assert_eq!(call(&s, "weight_report", json!({"object": m}))["unweighted"]["count"], 0);
+    }
+    let bones = call(&s, "list_bones", json!({"object": "Sleeve"})); // a bound mesh resolves to its rig
+    assert_eq!(bones["object"], "Rig");
+    assert_eq!(bones["bound_meshes"], json!(["Body", "Sleeve"]));
+    let e = call_err(&s, "bind_to_armature", json!({"object": "Body", "armature": "Sleeve"}));
+    assert!(e.contains("no skeleton"), "{e}");
+
+    // Posing "the body" poses the rig; a clip on the rig moves both meshes.
+    call(&s, "create_clip", json!({"name": "bend", "frames": 12}));
+    call(&s, "key_pose", json!({"clip": "bend", "frame": 0, "object": "Body", "bones": ["lower"]}));
+    call(&s, "pose_bone", json!({"object": "Body", "bone": "lower", "rotation": [0, 0, 90]}));
+    call(&s, "key_pose", json!({"clip": "bend", "frame": 12, "object": "Body"}));
+    call(&s, "clear_pose", json!({"object": "Body"}));
+    let d = call(&s, "describe_clip", json!({"clip": "bend"}));
+    assert_eq!(d["channels"][0]["object"], "Rig", "{d}");
+    {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let sc = &g.doc.scene;
+        let cid = sc.resolve_clip("bend").unwrap();
+        let posed = polly_core::anim::pose_scene(sc, &[polly_core::anim::ClipPlay { clip: cid, time: 0.5, weight: 1.0 }]);
+        for name in ["Body", "Sleeve"] {
+            let id = sc.resolve(Some(name)).unwrap();
+            let (rest, now) = (&sc.objects[&id].mesh, &posed.objects[&id].mesh);
+            let tip = rest.verts.iter().max_by(|a, b| a.1.pos.y.total_cmp(&b.1.pos.y)).map(|(v, _)| *v).unwrap();
+            let w = posed.world_matrix(id).transform_point3(now.pos(tip));
+            assert!(w.x < -0.7 && w.y.abs() < 0.35, "{name} tip should swing to -X, got {w}");
+        }
+    }
+
+    // A mirrored glove moves its weights to the mirrored bones.
+    call(&s, "add_bone", json!({"object": "Rig", "name": "hand.L", "head": [0.5, 0, 0], "tail": [0.8, 0, 0]}));
+    call(&s, "add_bone", json!({"object": "Rig", "name": "hand.R", "head": [-0.5, 0, 0], "tail": [-0.8, 0, 0]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.2, 0.2, 0.2]}, "name": "Glove.L", "position": [0.65, 0, 0]}));
+    call(&s, "bind_to_armature", json!({"object": "Glove.L", "armature": "Rig"}));
+    call(&s, "assign_weights", json!({"object": "Glove.L", "elements": ["all"], "bone": "hand.L"}));
+    call(&s, "mirror_object", json!({"object": "Glove.L"}));
+    let rep = call(&s, "weight_report", json!({"object": "Glove.R"}));
+    assert_eq!(rep["verts_per_bone"]["hand.R"], 8, "{rep}");
+    assert_eq!(rep["verts_per_bone"]["hand.L"], 0, "{rep}");
+
+    // Export says what isn't supported yet; deleting the rig unbinds.
+    let dir = std::env::temp_dir().join(format!("polly-armature-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let r = call(&s, "export_glb", json!({"path": dir.join("a.glb").to_str().unwrap()}));
+    assert!(r["warning"].as_str().unwrap().contains("Body"), "{r}");
+    std::fs::remove_dir_all(dir).ok();
+    call(&s, "delete_object", json!({"object": "Rig"}));
+    let sc = call(&s, "describe_scene", json!({}));
+    assert!(sc["objects"].as_array().unwrap().iter().all(|o| o.get("skinned_to").is_none()), "{sc}");
+}

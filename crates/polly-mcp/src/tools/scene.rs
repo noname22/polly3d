@@ -131,6 +131,12 @@ pub fn object_summary(scene: &Scene, id: u32) -> serde_json::Value {
     if !o.visible {
         j["visible"] = json!(false);
     }
+    if let Some(sk) = &o.skeleton {
+        j["bones"] = json!(sk.bones.len());
+    }
+    if let Some(b) = o.skin {
+        j["skinned_to"] = json!(scene.objects.get(&b.armature).map(|a| a.name.clone()));
+    }
     if !o.selection.is_empty() {
         j["selection"] = json!({"verts": o.selection.verts.len(), "edges": o.selection.edges.len(), "faces": o.selection.faces.len()});
     }
@@ -297,6 +303,7 @@ fn duplicate_object(ctx: &mut Ctx, a: Duplicate) -> Result<Out> {
         n.transform = o.transform;
         n.transform.translation += Vec3::from_array(a.offset.unwrap_or([0.0; 3]));
         n.parent = o.parent;
+        n.skin = o.skin;
         Ok(id)
     })?;
     Ok(Out::json(object_summary(&ctx.doc.scene, id)))
@@ -433,6 +440,10 @@ fn join_objects(ctx: &mut Ctx, a: Join) -> Result<Out> {
     }
     let ids = a.objects.iter().map(|n| ctx.doc.scene.resolve(Some(n))).collect::<polly_core::Result<Vec<_>>>()?;
     let target = ids[0];
+    let skins: std::collections::BTreeSet<Option<u32>> = ids.iter().map(|i| ctx.doc.scene.objects[i].skin.map(|b| b.armature)).collect();
+    if skins.len() > 1 {
+        bail!("these objects are bound to different armatures (or some are unbound); bind them to the same armature first");
+    }
     edit_scene(ctx, "join objects", |s| {
         // Faces without a part keep their object's name as the part.
         let label = |m: &mut polly_core::mesh::Mesh, name: &str| {
@@ -483,15 +494,18 @@ fn separate(ctx: &mut Ctx, a: Separate) -> Result<Out> {
         let mut part = (*o.mesh).clone();
         part.faces.retain(|f, _| faces.contains(f));
         part.remove_loose_verts();
+        polly_core::anim::prune_weights(&mut part, None);
         let mut rest = (*o.mesh).clone();
         rest.faces.retain(|f, _| !faces.contains(f));
         rest.remove_loose_verts();
+        polly_core::anim::prune_weights(&mut rest, None);
         s.object_mut(id)?.mesh = Arc::new(rest);
         s.object_mut(id)?.selection = Default::default();
         let nid = s.add_object(a.name.as_deref().unwrap_or(&format!("{}.part", o.name)), part);
         let n = s.object_mut(nid)?;
         n.transform = o.transform;
         n.parent = o.parent;
+        n.skin = o.skin;
         Ok(nid)
     })?;
     Ok(Out::json(json!({"new_object": object_summary(&ctx.doc.scene, new_id), "from": object_summary(&ctx.doc.scene, id)})))
@@ -655,6 +669,7 @@ fn array(ctx: &mut Ctx, a: ArrayArgs) -> Result<Out> {
                 let n = s.object_mut(nid)?;
                 n.transform = o.transform;
                 n.parent = o.parent;
+                n.skin = o.skin;
                 created.push(nid);
             } else {
                 merged.append(&copy);
@@ -793,6 +808,25 @@ fn mirror_object(ctx: &mut Ctx, a: MirrorObject) -> Result<Out> {
         n.transform = polly_core::scene::Transform { translation: t, rotation: r, scale: sc };
         n.parent = o.parent;
         n.morph_weights = o.morph_weights.clone();
+        n.skin = o.skin;
+        if let Some(sk) = o.skin.and_then(|b| s.objects.get(&b.armature)).and_then(|a| a.skeleton.clone()) {
+            // Gear bound to a symmetric rig: weights move to the mirrored bones (hand.L -> hand.R).
+            let swap: std::collections::BTreeMap<u32, u32> = sk
+                .bones
+                .iter()
+                .filter_map(|(id, b)| {
+                    let other = mirror_name(&b.name);
+                    sk.bones.iter().find(|(_, x)| x.name == other).map(|(oid, _)| (*id, *oid))
+                })
+                .collect();
+            let m = Arc::make_mut(&mut s.object_mut(nid)?.mesh);
+            for list in m.weights.values_mut() {
+                for (b, _) in list.iter_mut() {
+                    *b = swap.get(b).copied().unwrap_or(*b);
+                }
+            }
+        }
+        let n = s.object_mut(nid)?;
         if let Some(mut sk) = o.skeleton.clone() {
             for b in sk.bones.values_mut() {
                 b.head *= flip;

@@ -22,6 +22,13 @@ pub fn tools() -> Vec<ToolDef> {
         // rig
         def("add_bone", "Add a bone to an object's skeleton (created on first use). Bones are given by head and tail points in the object's local space; +Y of the bone runs head->tail.", false, add_bone),
         def("add_bone_chain", "Add a chain of connected bones through a list of points (n points -> n-1 bones), e.g. a spine, tail, arm or finger.", false, add_bone_chain),
+        def(
+            "bind_to_armature",
+            "Skin an object to another object's skeleton (an armature), so one skeleton deforms the body and its gear and one set of clips animates them all. Weights then refer to the armature's bones (auto_weights or assign_weights). Parents the object to the armature by default.",
+            false,
+            bind_to_armature,
+        ),
+        def("unbind", "Stop skinning an object to its armature (its weights are kept).", false, unbind),
         def("edit_bone", "Rename, move (head/tail), re-parent or roll a bone (rest pose).", false, edit_bone),
         def("delete_bone", "Delete a bone; its children are re-parented and its weights removed.", false, delete_bone),
         def("list_bones", "List an object's bones with rest head/tail, parent, current pose and how many vertices each one influences.", true, list_bones),
@@ -66,15 +73,23 @@ pub fn tools() -> Vec<ToolDef> {
 
 // ---- helpers ----------------------------------------------------------------
 
-fn bone_of(scene: &Scene, obj: ObjectId, name: &str) -> Result<BoneId> {
-    let o = scene.object(obj)?;
-    let sk = o.skeleton.as_ref().with_context(|| format!("'{}' has no skeleton; add bones with add_bone", o.name))?;
-    Ok(sk.find(name)?)
+/// The object holding the skeleton for `obj`: its armature if `obj` is bound
+/// to one, else `obj` itself (which may not have a skeleton yet).
+pub fn rig(scene: &Scene, obj: ObjectId) -> ObjectId {
+    scene.objects.get(&obj).and_then(|o| o.skin).map_or(obj, |b| b.armature)
 }
 
+fn bone_of(scene: &Scene, obj: ObjectId, name: &str) -> Result<BoneId> {
+    Ok(skeleton(scene, obj)?.find(name)?)
+}
+
+/// The skeleton that deforms `obj` (its own or its armature's).
 fn skeleton(scene: &Scene, obj: ObjectId) -> Result<&Skeleton> {
-    let o = scene.object(obj)?;
-    o.skeleton.as_ref().with_context(|| format!("'{}' has no skeleton; add bones with add_bone", o.name))
+    let r = rig(scene, obj);
+    let o = scene.object(r)?;
+    o.skeleton
+        .as_ref()
+        .with_context(|| format!("'{}' has no skeleton; add bones with add_bone, or bind_to_armature", scene.object(obj).map_or("?", |o| o.name.as_str())))
 }
 
 fn v3(a: [f32; 3]) -> Vec3 {
@@ -181,7 +196,7 @@ struct AddBone {
 }
 
 fn add_bone(ctx: &mut Ctx, a: AddBone) -> Result<Out> {
-    let obj = resolve(&ctx.doc.scene, &a.object)?;
+    let obj = rig(&ctx.doc.scene, resolve(&ctx.doc.scene, &a.object)?);
     edit_scene(ctx, "add bone", |s| {
         let parent = match &a.parent {
             Some(p) => Some(s.object(obj)?.skeleton.as_ref().map(|sk| sk.find(p)).transpose()?.ok_or_else(|| {
@@ -228,7 +243,7 @@ fn add_bone_chain(ctx: &mut Ctx, a: BoneChain) -> Result<Out> {
         Some(ns) => bail!("{} points make {n} bones but {} names were given", a.points.len(), ns.len()),
         None => (1..=n).map(|i| format!("{}.{i}", a.prefix)).collect(),
     };
-    let obj = resolve(&ctx.doc.scene, &a.object)?;
+    let obj = rig(&ctx.doc.scene, resolve(&ctx.doc.scene, &a.object)?);
     edit_scene(ctx, "add bone chain", |s| {
         let o = s.object_mut(obj)?;
         let sk = o.skeleton.get_or_insert_with(Skeleton::default);
@@ -255,7 +270,7 @@ struct EditBone {
 }
 
 fn edit_bone(ctx: &mut Ctx, a: EditBone) -> Result<Out> {
-    let obj = resolve(&ctx.doc.scene, &a.object)?;
+    let obj = rig(&ctx.doc.scene, resolve(&ctx.doc.scene, &a.object)?);
     let id = bone_of(&ctx.doc.scene, obj, &a.bone)?;
     edit_scene(ctx, "edit bone", |s| {
         let sk = s.object_mut(obj)?.skeleton.as_mut().unwrap();
@@ -306,14 +321,19 @@ struct BoneArg {
 }
 
 fn delete_bone(ctx: &mut Ctx, a: BoneArg) -> Result<Out> {
-    let obj = resolve(&ctx.doc.scene, &a.object)?;
+    let obj = rig(&ctx.doc.scene, resolve(&ctx.doc.scene, &a.object)?);
     let id = bone_of(&ctx.doc.scene, obj, &a.bone)?;
     edit_scene(ctx, "delete bone", |s| {
         let o = s.object_mut(obj)?;
         o.skeleton.as_mut().unwrap().remove(id)?;
         o.pose.remove(&id);
         let sk = o.skeleton.clone();
-        anim::prune_weights(Arc::make_mut(&mut o.mesh), sk.as_ref());
+        // The rig's own mesh and every mesh bound to it lose that bone's weights.
+        for (oid, ob) in s.objects.iter_mut() {
+            if *oid == obj || ob.skin.is_some_and(|b| b.armature == obj) {
+                anim::prune_weights(Arc::make_mut(&mut ob.mesh), sk.as_ref());
+            }
+        }
         for c in s.clips.values_mut() {
             c.channels.retain(|ch| {
                 !matches!(ch.target,
@@ -333,15 +353,21 @@ struct ObjectArg {
 
 fn list_bones(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
     let s = &ctx.doc.scene;
-    let obj = resolve(s, &a.object)?;
+    let obj = rig(s, resolve(s, &a.object)?);
     let o = s.object(obj)?;
     let Some(sk) = &o.skeleton else { return Ok(ok(format!("'{}' has no skeleton", o.name))) };
+    // Weighted vertices per bone, over the rig's own mesh and all bound meshes.
+    let skinned: Vec<&polly_core::scene::Object> =
+        s.objects.iter().filter(|(id, ob)| **id == obj || ob.skin.is_some_and(|b| b.armature == obj)).map(|(_, ob)| ob).collect();
     let mut counts: BTreeMap<BoneId, usize> = BTreeMap::new();
-    for l in o.mesh.weights.values() {
-        for (b, _) in l {
-            *counts.entry(*b).or_default() += 1;
+    for ob in &skinned {
+        for l in ob.mesh.weights.values() {
+            for (b, _) in l {
+                *counts.entry(*b).or_default() += 1;
+            }
         }
     }
+    let bound: Vec<&str> = s.objects.values().filter(|ob| ob.skin.is_some_and(|b| b.armature == obj)).map(|ob| ob.name.as_str()).collect();
     let bones: Vec<Value> = sk
         .ordered()
         .into_iter()
@@ -360,7 +386,14 @@ fn list_bones(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
             j
         })
         .collect();
-    Ok(Out::json(json!({"object": o.name, "bones": bones, "unweighted_verts": o.mesh.verts.len() - o.mesh.weights.len()})))
+    let mut j = json!({"object": o.name, "bones": bones});
+    if !o.mesh.verts.is_empty() {
+        j["unweighted_verts"] = json!(o.mesh.verts.len() - o.mesh.weights.len());
+    }
+    if !bound.is_empty() {
+        j["bound_meshes"] = json!(bound);
+    }
+    Ok(Out::json(j))
 }
 
 // ---- skin -----------------------------------------------------------------
@@ -411,9 +444,10 @@ fn auto_weights(ctx: &mut Ctx, a: AutoWeightArgs) -> Result<Out> {
         Some(ns) => ns.iter().map(|n| sk.find(n)).collect::<polly_core::Result<_>>()?,
     };
     let ids = Some(a.elements.clone().unwrap_or_else(|| vec!["all".into()]));
+    let to_skel = ctx.doc.scene.to_skeleton_space(obj);
     edit_mesh(ctx, &a.object, Some(&ids), "auto weights", |m, s| {
         let verts = s.touched_verts(m);
-        anim::auto_weights(m, &sk, &verts, &bones, a.method.unwrap_or(AutoWeights::Rigid))?;
+        anim::auto_weights_in(m, &sk, &verts, &bones, a.method.unwrap_or(AutoWeights::Rigid), to_skel)?;
         anim::normalize_weights(m);
         Ok(Default::default())
     })
@@ -473,7 +507,7 @@ struct PoseBone {
 }
 
 fn pose_bone(ctx: &mut Ctx, a: PoseBone) -> Result<Out> {
-    let obj = resolve(&ctx.doc.scene, &a.object)?;
+    let obj = rig(&ctx.doc.scene, resolve(&ctx.doc.scene, &a.object)?);
     let b = bone_of(&ctx.doc.scene, obj, &a.bone)?;
     edit_scene(ctx, "pose bone", |s| {
         let o = s.object_mut(obj)?;
@@ -505,7 +539,7 @@ struct ClearPose {
 }
 
 fn clear_pose(ctx: &mut Ctx, a: ClearPose) -> Result<Out> {
-    let obj = resolve(&ctx.doc.scene, &a.object)?;
+    let obj = rig(&ctx.doc.scene, resolve(&ctx.doc.scene, &a.object)?);
     let ids = a.bones.as_ref().map(|ns| ns.iter().map(|n| bone_of(&ctx.doc.scene, obj, n)).collect::<Result<Vec<_>>>()).transpose()?;
     edit_scene(ctx, "clear pose", |s| {
         let o = s.object_mut(obj)?;
@@ -845,8 +879,10 @@ struct KeyPose {
 fn key_pose(ctx: &mut Ctx, a: KeyPose) -> Result<Out> {
     let s = &ctx.doc.scene;
     let clip = s.resolve_clip(&a.clip)?;
-    let obj = resolve(s, &a.object)?;
+    let mesh_obj = resolve(s, &a.object)?;
+    let obj = rig(s, mesh_obj);
     let o = s.object(obj)?;
+    let mo = s.object(mesh_obj)?;
     let props: BTreeSet<String> = a.properties.clone().unwrap_or_else(|| vec!["rotation".into(), "translation".into()]).into_iter().collect();
     for p in &props {
         if !["rotation", "translation", "scale"].contains(&p.as_str()) {
@@ -873,8 +909,8 @@ fn key_pose(ctx: &mut Ctx, a: KeyPose) -> Result<Out> {
         bail!("nothing to key: pose some bones first (pose_bone), or pass bones / morphs / object_transform");
     }
     let t = secs(s, clip, a.frame);
-    let (pose, weights, tr) = (o.pose.clone(), o.morph_weights.clone(), o.transform);
-    let morph_names: Vec<String> = o.mesh.morphs.iter().map(|m| m.name.clone()).collect();
+    let (pose, weights, tr) = (o.pose.clone(), mo.morph_weights.clone(), mo.transform);
+    let morph_names: Vec<String> = mo.mesh.morphs.iter().map(|m| m.name.clone()).collect();
     let mut n = 0;
     edit_scene(ctx, "key pose", |s| {
         let c = s.clips.get_mut(&clip).unwrap();
@@ -896,14 +932,14 @@ fn key_pose(ctx: &mut Ctx, a: KeyPose) -> Result<Out> {
         if a.morphs {
             for m in &morph_names {
                 let w = weights.get(m).copied().unwrap_or(0.0);
-                c.channel_mut(Target::MorphWeight { object: obj, morph: m.clone() }).set_key(t, Vec4::new(w, 0.0, 0.0, 0.0));
+                c.channel_mut(Target::MorphWeight { object: mesh_obj, morph: m.clone() }).set_key(t, Vec4::new(w, 0.0, 0.0, 0.0));
                 n += 1;
             }
         }
         if a.object_transform {
-            c.channel_mut(Target::ObjectTranslation { object: obj }).set_key(t, tr.translation.extend(0.0));
-            c.channel_mut(Target::ObjectRotation { object: obj }).set_key(t, Vec4::from(tr.rotation));
-            c.channel_mut(Target::ObjectScale { object: obj }).set_key(t, tr.scale.extend(0.0));
+            c.channel_mut(Target::ObjectTranslation { object: mesh_obj }).set_key(t, tr.translation.extend(0.0));
+            c.channel_mut(Target::ObjectRotation { object: mesh_obj }).set_key(t, Vec4::from(tr.rotation));
+            c.channel_mut(Target::ObjectScale { object: mesh_obj }).set_key(t, tr.scale.extend(0.0));
             n += 3;
         }
         if t > c.length {
@@ -956,10 +992,11 @@ fn set_key(ctx: &mut Ctx, a: SetKey) -> Result<Out> {
         }
         (Some(b), None) => {
             let bone = bone_of(s, obj, b)?;
+            let r = rig(s, obj);
             match prop {
-                "rotation" => (Target::BoneRotation { object: obj, bone }, Vec4::from(quat_from_euler_degrees(vec3()?.to_array()))),
-                "translation" => (Target::BoneTranslation { object: obj, bone }, vec3()?.extend(0.0)),
-                "scale" => (Target::BoneScale { object: obj, bone }, vec3()?.extend(0.0)),
+                "rotation" => (Target::BoneRotation { object: r, bone }, Vec4::from(quat_from_euler_degrees(vec3()?.to_array()))),
+                "translation" => (Target::BoneTranslation { object: r, bone }, vec3()?.extend(0.0)),
+                "scale" => (Target::BoneScale { object: r, bone }, vec3()?.extend(0.0)),
                 p => bail!("unknown property '{p}'"),
             }
         }
@@ -1128,4 +1165,68 @@ fn render_animation(ctx: &mut Ctx, a: RenderAnim) -> Result<Out> {
     }
     drop(renderer);
     Ok(Out::json(json!({"frames": frames, "clips": a.clips.iter().map(|p| &p.clip).collect::<Vec<_>>()})).with_image(super::view::png(&img)?))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Bind {
+    /// The mesh to skin (default: active).
+    object: Option<String>,
+    /// The object with the skeleton.
+    armature: String,
+    /// Parent the object to the armature, keeping its world placement (default true).
+    #[serde(default = "yes")]
+    parent: bool,
+}
+
+fn bind_to_armature(ctx: &mut Ctx, a: Bind) -> Result<Out> {
+    let s = &ctx.doc.scene;
+    let obj = resolve(s, &a.object)?;
+    let arm = s.resolve(Some(&a.armature))?;
+    if obj == arm {
+        bail!("an object cannot be bound to itself");
+    }
+    let Some(sk) = s.object(arm)?.skeleton.clone() else {
+        bail!("'{}' has no skeleton (add bones with add_bone first)", a.armature);
+    };
+    if s.object(obj)?.skeleton.is_some() {
+        bail!("'{}' has its own skeleton; bind only meshes without one", s.object(obj)?.name);
+    }
+    if s.object(arm)?.skin.is_some() {
+        bail!("'{}' is itself bound to an armature", a.armature);
+    }
+    edit_scene(ctx, "bind to armature", |s| {
+        if a.parent {
+            let world = s.world_matrix(obj);
+            s.set_parent(obj, Some(arm))?;
+            let local = s.world_matrix(arm).inverse() * world;
+            let (sc, r, t) = local.to_scale_rotation_translation();
+            let tr = &mut s.object_mut(obj)?.transform;
+            tr.translation = t;
+            tr.rotation = r;
+            tr.scale = sc;
+        }
+        let o = s.object_mut(obj)?;
+        o.skin = Some(polly_core::scene::SkinBinding { armature: arm });
+        // Weights that don't refer to this skeleton's bones are meaningless now.
+        anim::prune_weights(Arc::make_mut(&mut o.mesh), Some(&sk));
+        Ok(())
+    })?;
+    let o = ctx.doc.scene.object(obj)?;
+    let mut j = json!({"object": o.name, "armature": a.armature, "weighted_verts": o.mesh.weights.len(), "verts": o.mesh.verts.len()});
+    if o.mesh.weights.is_empty() {
+        j["hint"] = json!("now give it weights: auto_weights (uses the armature's bones) or assign_weights");
+    }
+    Ok(Out::json(j))
+}
+
+fn unbind(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
+    let obj = resolve(&ctx.doc.scene, &a.object)?;
+    if ctx.doc.scene.object(obj)?.skin.is_none() {
+        bail!("'{}' is not bound to an armature", ctx.doc.scene.object(obj)?.name);
+    }
+    edit_scene(ctx, "unbind", |s| {
+        s.object_mut(obj)?.skin = None;
+        Ok(())
+    })?;
+    Ok(ok("unbound (weights kept)"))
 }
