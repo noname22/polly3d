@@ -37,7 +37,8 @@ pub enum View {
         ortho: bool,
     },
     /// Perspective orbit around the focus centre. yaw 0 = camera on +Z (front),
-    /// yaw 90 = camera on +X (right); pitch > 0 = above. Distance auto-fits when omitted.
+    /// yaw 90 = camera on +X (right); pitch > 0 = above. When `distance` is omitted
+    /// the bounding sphere is framed, so the distance is the same at every angle.
     Orbit {
         #[serde(default)]
         yaw_deg: f32,

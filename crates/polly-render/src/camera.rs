@@ -237,6 +237,9 @@ pub(crate) fn resolve(view: &View, frame: (Vec3, Vec3), depth: (Vec3, Vec3), zoo
                     * 1.2;
                 let dist = match view {
                     View::Orbit { distance: Some(d), .. } if *d > 0.0 => *d,
+                    // Orbits frame the bounding sphere, which is the same from every
+                    // angle, so dragging around the model keeps a constant distance.
+                    View::Orbit { .. } => radius * 1.05 / tv.min(th).atan().sin(),
                     _ => fit.max(radius * 1.2),
                 };
                 fov = (2.0 * (tv / zoom).atan()).to_degrees();

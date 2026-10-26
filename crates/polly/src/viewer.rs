@@ -86,7 +86,8 @@ impl App {
             Cam::Fixed("front") => View::Front,
             Cam::Fixed("right") => View::Right,
             Cam::Fixed("top") => View::Top,
-            Cam::Fixed(_) => View::Persp,
+            // Same angle as View::Persp but orbit framing, so the first drag doesn't jump.
+            Cam::Fixed(_) => View::Orbit { yaw_deg: 35.0, pitch_deg: 25.0, distance: None },
             Cam::Orbit { yaw, pitch } => View::Orbit { yaw_deg: yaw, pitch_deg: pitch, distance: None },
         }
     }

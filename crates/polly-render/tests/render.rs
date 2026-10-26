@@ -212,3 +212,23 @@ fn options_deserialize_with_defaults() {
     assert_eq!(o.view, View::Front);
     let _schema = schemars::schema_for!(RenderOptions);
 }
+
+/// Orbiting must not "breathe": the eye stays at a constant distance from the
+/// target regardless of how the (here very elongated) model is oriented.
+#[test]
+fn orbit_distance_is_independent_of_angle() {
+    let mut scene = Scene::default();
+    scene.add_object("Plank", polly_core::primitives::cube(glam::Vec3::new(4.0, 0.3, 0.6)));
+    let dist = |yaw: f32, pitch: f32| {
+        let o = RenderOptions { view: View::Orbit { yaw_deg: yaw, pitch_deg: pitch, distance: None }, ..RenderOptions::default() };
+        let c = polly_render::resolve_camera(&scene, &o);
+        (glam::Vec3::from(c.eye) - glam::Vec3::from(c.target)).length()
+    };
+    let d0 = dist(0.0, 20.0);
+    for yaw in (0..360).step_by(15) {
+        for pitch in [-60.0, 0.0, 20.0, 80.0] {
+            let d = dist(yaw as f32, pitch);
+            assert!((d - d0).abs() < 1e-4 * d0, "yaw {yaw} pitch {pitch}: {d} vs {d0}");
+        }
+    }
+}
