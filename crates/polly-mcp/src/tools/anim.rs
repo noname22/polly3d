@@ -31,7 +31,7 @@ pub fn tools() -> Vec<ToolDef> {
         def("normalize_weights", "Keep the 4 strongest bones per vertex and make each vertex's weights sum to 1.", false, normalize_weights),
         def("weight_report", "Skin weight summary: vertices per bone, unweighted vertices, vertices with more than 4 influences or unnormalized sums.", true, weight_report),
         // pose
-        def("pose_bone", "Pose a bone relative to its rest pose (rotation in Euler XYZ degrees around the bone's own axes, translation, scale). This is the static pose shown in renders; key it into a clip with key_pose.", false, pose_bone),
+        def("pose_bone", "Pose a bone relative to its rest pose (rotation in Euler degrees about the bone's rest axes, +Y along the bone; translation; scale). This is the static pose shown in renders; key it into a clip with key_pose.", false, pose_bone),
         def("clear_pose", "Reset bones (default all) of an object to the rest pose.", false, clear_pose),
         // morphs
         def("begin_morph", "Start editing a morph target (shape key): move/scale/rotate vertices with the normal tools, then end_morph stores the change as the morph and restores the base shape. Editing an existing morph starts from its shape.", false, begin_morph),
@@ -463,7 +463,7 @@ fn weight_report(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
 struct PoseBone {
     object: Option<String>,
     bone: String,
-    /// Euler XYZ degrees around the bone's own axes (+Y = along the bone).
+    /// Euler degrees about the bone's rest axes (+Y runs along the bone, head to tail). R = Rx·Ry·Rz: Z first, then Y, then X.
     rotation: Option<[f32; 3]>,
     translation: Option<[f32; 3]>,
     scale: Option<Scalar3>,
@@ -927,7 +927,7 @@ struct SetKey {
     bone: Option<String>,
     /// Morph to key (value = [weight]).
     morph: Option<String>,
-    /// "rotation" (value = Euler XYZ degrees), "translation" or "scale" (value = [x,y,z]). Ignored for morphs.
+    /// "rotation" (value = Euler degrees, R = Rx·Ry·Rz), "translation" or "scale" (value = [x,y,z]). Ignored for morphs.
     property: Option<String>,
     value: Vec<f32>,
     interpolation: Option<Interpolation>,

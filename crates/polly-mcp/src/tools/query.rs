@@ -29,7 +29,7 @@ pub fn tools() -> Vec<ToolDef> {
         def("list_edges", "List edges with length, adjacent faces, seam/sharp flags. Paginated.", true, list_edges),
         def(
             "select",
-            "Select elements by a query (normal direction, box, plane side, edge loop/ring, face loop, linked, material, boundary, sharp, nearest, grow, shrink, ids, all) and store it as the object's selection. Most edit tools act on the selection when `elements` is omitted. Returns the selected ids.",
+            "Select elements by a query (normal direction, box, plane side, edge loop/ring, face loop, linked, material, part, boundary, sharp, nearest, grow, shrink, ids, all) and store it as the object's selection. Most edit tools act on the selection when `elements` is omitted. Returns the selected ids.",
             false,
             select,
         ),
@@ -46,6 +46,25 @@ pub fn tools() -> Vec<ToolDef> {
 struct ObjectArg {
     /// Object name or id like "o2" (default: active object).
     object: Option<String>,
+}
+
+/// Named parts with their face ids, e.g. {"head": "f400..f507"}.
+pub fn parts_json(m: &polly_core::mesh::Mesh) -> serde_json::Value {
+    let mut parts: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
+    for (id, f) in &m.faces {
+        if let Some(p) = &f.part {
+            parts.entry(p).or_default().push(*id);
+        }
+    }
+    let mut j = serde_json::Map::new();
+    for (name, ids) in parts {
+        j.insert(name.to_string(), json!(ids::compress("f", ids)));
+    }
+    let unlabelled = m.faces.values().filter(|f| f.part.is_none()).count();
+    if !j.is_empty() && unlabelled > 0 {
+        j.insert("(no part)".into(), json!(format!("{unlabelled} faces")));
+    }
+    j.into()
 }
 
 fn describe_mesh(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
@@ -68,6 +87,7 @@ fn describe_mesh(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
     }
     let mut j = json!({
         "object": o.name,
+        "parts": parts_json(m),
         "verts": m.verts.len(),
         "edges": m.edges().len(),
         "faces": m.faces.len(),
@@ -142,6 +162,9 @@ fn list_faces(ctx: &mut Ctx, a: ListArgs) -> Result<Out> {
             }
             if f.smooth {
                 r["smooth"] = json!(true);
+            }
+            if let Some(p) = &f.part {
+                r["part"] = json!(p);
             }
             r
         })

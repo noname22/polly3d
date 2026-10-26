@@ -17,7 +17,7 @@ pub fn tools() -> Vec<ToolDef> {
         def("move", "Translate elements (verts/edges/faces) by an offset in object space.", false, move_),
         def(
             "rotate",
-            "Rotate elements by Euler XYZ degrees, or by `angle` degrees around `axis`, about a pivot.",
+            "Rotate elements by Euler degrees (see `rotation`), or by `angle` degrees around `axis`, about a pivot.",
             false,
             rotate,
         ),
@@ -48,6 +48,7 @@ pub fn tools() -> Vec<ToolDef> {
         def("duplicate", "Copy faces (as new disconnected geometry) with an offset. The copies become the selection.", false, duplicate),
         def("add_vertex", "Add loose vertices (connect them with add_face).", false, add_vertex),
         def("add_face", "Create a face from existing vertex ids (CCW seen from outside).", false, add_face),
+        def("set_part", "Label faces as a named part (\"\" removes the label). Parts survive edits and joins and can be selected with select {\"by\":\"part\"}.", false, set_part),
         def("set_smooth", "Set faces to smooth or flat shading.", false, set_smooth),
         def("mark_sharp", "Mark/clear edges as sharp (shading split on smooth faces).", false, mark_sharp),
         def("set_vertex_color", "Set vertex colors (per face corner) for elements: corners of selected faces, or all corners at selected vertices.", false, set_vertex_color),
@@ -58,7 +59,7 @@ pub fn tools() -> Vec<ToolDef> {
 struct Move {
     /// Object name (default: active object).
     object: Option<String>,
-    /// Element ids like ["f1","v3","e2-5"], "all", or "selection" (default: current selection).
+    /// Element ids like ["f1","v3","e2-5"], ranges like "f400..f507", comma lists in one string, "all", or "selection" (default: current selection).
     elements: Option<Vec<String>>,
     offset: [f32; 3],
 }
@@ -74,7 +75,7 @@ fn move_(ctx: &mut Ctx, a: Move) -> Result<Out> {
 struct Rotate {
     object: Option<String>,
     elements: Option<Vec<String>>,
-    /// Euler XYZ degrees.
+    /// Euler degrees [x, y, z]: R = Rx·Ry·Rz, i.e. Z is applied first, then Y, then X about the parent's axes (equivalently X, Y, Z about the object's own axes).
     rotation: Option<[f32; 3]>,
     axis: Option<[f32; 3]>,
     /// Degrees around `axis`.
@@ -560,5 +561,28 @@ fn set_vertex_color(ctx: &mut Ctx, a: VertexColor) -> Result<Out> {
             }
         }
         Ok(Selection::default())
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SetPart {
+    object: Option<String>,
+    /// Faces (default: current selection).
+    elements: Option<Vec<String>>,
+    /// Part name; "" removes the label.
+    name: String,
+}
+
+fn set_part(ctx: &mut Ctx, a: SetPart) -> Result<Out> {
+    let name = (!a.name.trim().is_empty()).then(|| a.name.trim().to_string());
+    edit_mesh(ctx, &a.object, Some(&a.elements), "set part", |m, s| {
+        let faces = s.implied_faces(m);
+        if faces.is_empty() {
+            return invalid("no faces given");
+        }
+        for f in &faces {
+            m.faces.get_mut(f).unwrap().part = name.clone();
+        }
+        Ok(Selection { faces, ..Default::default() })
     })
 }

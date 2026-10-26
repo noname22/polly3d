@@ -173,7 +173,7 @@ pub fn merge_faces(mesh: &mut Mesh, region: &BTreeSet<FaceId>) -> Result<FaceId>
         mesh.remove_face(*f);
     }
     let corners = loopv.iter().map(|v| corner_of[v]).collect();
-    let id = mesh.add_face_with(loopv, corners, template.material, template.smooth)?;
+    let id = mesh.add_face_from(loopv, corners, &template)?;
     let used: BTreeSet<VertId> = mesh.faces.values().flat_map(|f| f.verts.iter().copied()).collect();
     for v in interior {
         if !used.contains(&v) {
@@ -322,11 +322,10 @@ pub fn triangulate(mesh: &mut Mesh, faces: &BTreeSet<FaceId>) -> Result<Selectio
         let tris = crate::geom::triangulate_polygon(&mesh.face_positions(&f));
         mesh.remove_face(*fid);
         for [a, b, c] in tris {
-            let id = mesh.add_face_with(
+            let id = mesh.add_face_from(
                 vec![f.verts[a], f.verts[b], f.verts[c]],
                 vec![f.corners[a], f.corners[b], f.corners[c]],
-                f.material,
-                f.smooth,
+                &f,
             )?;
             out.faces.insert(id);
         }
@@ -463,7 +462,7 @@ pub fn mirror(mesh: &mut Mesh, axis: usize, merge: f32) -> Result<Selection> {
         let mut corners = f.corners.clone();
         verts.reverse();
         corners.reverse();
-        out.faces.insert(mesh.add_face_with(verts, corners, f.material, f.smooth)?);
+        out.faces.insert(mesh.add_face_from(verts, corners, f)?);
     }
     for f in dead {
         mesh.remove_face(f);
@@ -494,7 +493,7 @@ pub fn duplicate(mesh: &mut Mesh, faces: &BTreeSet<FaceId>, offset: Vec3) -> Res
                 })
             })
             .collect();
-        out.faces.insert(mesh.add_face_with(verts, f.corners, f.material, f.smooth)?);
+        out.faces.insert(mesh.add_face_from(verts, f.corners.clone(), &f)?);
     }
     Ok(out)
 }

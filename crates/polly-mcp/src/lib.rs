@@ -24,8 +24,12 @@ pub const INSTRUCTIONS: &str = r#"Polly3D is a low-poly 3-D modeller you drive e
 
 Conventions
 - Y is up, right-handed; "front" looks from +Z toward -Z, "right" from +X. Units are arbitrary (1 = 1 m is a good habit).
+- Rotations are Euler degrees [x, y, z] with R = Rx·Ry·Rz: about the parent's (or world) axes Z is applied first, then Y, then X; equivalently X, Y, Z about the object's own axes. Positive angles turn counter-clockwise when looking down the axis toward the origin (right-hand rule).
+- Parenting (set_parent) makes a part follow another (e.g. a bracer parented to its forearm); match_transform copies one object's placement onto another.
 - Objects are addressed by name (or "o<id>"); tools default to the active object (the last one created/selected).
 - Mesh elements have stable ids: vertices "v12", faces "f3", edges "e3-9" (the two vertex ids). Ids never get reused.
+- Element arguments accept ids, ranges ("f400..f507" = the faces that exist in that range; also "v1..v9"), comma lists in one string ("f1, f4..f9"), "all" and "selection". Results report ids in the same compact form, so they can be pasted back.
+- Faces can carry a part name (join_objects names parts after the joined objects; set_part labels faces); select {"by":"part","name":"head"}.
 - Most edit tools take `elements` (ids, "all", or "selection"); when omitted they act on the object's current selection. Tools that create geometry (extrude, inset, bevel, loop_cut, subdivide, ...) set the selection to the result, so you can chain them.
 - Edits are atomic and undoable (undo/redo, checkpoint/restore). Each edit reports added/removed ids and topology warnings.
 - UVs follow glTF: (0,0) is the top-left of the texture, v grows downward. Pixel coordinates are (0,0) at top-left.

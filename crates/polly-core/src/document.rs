@@ -117,32 +117,29 @@ pub fn mesh_diff(before: &Mesh, after: &Mesh) -> Value {
     let av: BTreeSet<_> = after.verts.keys().collect();
     let bf: BTreeSet<_> = before.faces.keys().collect();
     let af: BTreeSet<_> = after.faces.keys().collect();
-    let modified: Vec<String> = after
-        .faces
-        .iter()
-        .filter(|(id, f)| before.faces.get(id).is_some_and(|b| b.verts != f.verts))
-        .map(|(id, _)| ids::face(*id))
-        .collect();
-    let list = |v: Vec<String>| crate::mesh::short_list(&v);
+    let modified = ids::compress(
+        "f",
+        after.faces.iter().filter(|(id, f)| before.faces.get(id).is_some_and(|b| b.verts != f.verts)).map(|(id, _)| *id),
+    );
     let mut d = serde_json::Map::new();
-    let added_v: Vec<_> = av.difference(&bv).map(|v| ids::vert(**v)).collect();
-    let removed_v: Vec<_> = bv.difference(&av).map(|v| ids::vert(**v)).collect();
-    let added_f: Vec<_> = af.difference(&bf).map(|f| ids::face(**f)).collect();
-    let removed_f: Vec<_> = bf.difference(&af).map(|f| ids::face(**f)).collect();
+    let added_v = ids::compress("v", av.difference(&bv).map(|v| **v));
+    let removed_v = ids::compress("v", bv.difference(&av).map(|v| **v));
+    let added_f = ids::compress("f", af.difference(&bf).map(|f| **f));
+    let removed_f = ids::compress("f", bf.difference(&af).map(|f| **f));
     if !added_v.is_empty() {
-        d.insert("added_verts".into(), json!(list(added_v)));
+        d.insert("added_verts".into(), json!(added_v));
     }
     if !removed_v.is_empty() {
-        d.insert("removed_verts".into(), json!(list(removed_v)));
+        d.insert("removed_verts".into(), json!(removed_v));
     }
     if !added_f.is_empty() {
-        d.insert("added_faces".into(), json!(list(added_f)));
+        d.insert("added_faces".into(), json!(added_f));
     }
     if !removed_f.is_empty() {
-        d.insert("removed_faces".into(), json!(list(removed_f)));
+        d.insert("removed_faces".into(), json!(removed_f));
     }
     if !modified.is_empty() {
-        d.insert("modified_faces".into(), json!(list(modified)));
+        d.insert("modified_faces".into(), json!(modified));
     }
     d.insert(
         "counts".into(),

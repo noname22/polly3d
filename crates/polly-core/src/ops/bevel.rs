@@ -195,7 +195,7 @@ pub fn bevel_edges(mesh: &mut Mesh, edges: &BTreeSet<Edge>, width: f32, segments
         let c = Corner { uv: glam::Vec2::ZERO, color: template.corners[0].color };
         for j in 0..segments as usize {
             let quad = vec![rb[j], ra[j], ra[j + 1], rb[j + 1]];
-            let id = mesh.add_face_with(quad, vec![c; 4], template.material, template.smooth)?;
+            let id = mesh.add_face_from(quad, vec![c; 4], &template)?;
             out.faces.insert(id);
         }
     }

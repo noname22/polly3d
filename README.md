@@ -95,6 +95,9 @@ element ids, picking and painting all work on the posed model.
 
 - Y up, right-handed. The "front" view looks from +Z.
 - Element ids are `v12` (vertex), `f3` (face) and `e3-9` (edge). Ids are never reused.
+- Element arguments also take ranges (`f400..f507`, meaning the faces that exist in that range) and comma lists in one string. Results report ids the same compact way, so they can be pasted back.
+- Faces can carry a part name. `join_objects` names parts after the joined objects, `set_part` labels faces, and `select {"by":"part"}` finds them. Faces created by edits inherit their source face's part.
+- Rotations are Euler degrees with R = Rx·Ry·Rz: Z first, then Y, then X about the parent's axes.
 - Edit tools act on the object's selection when `elements` is omitted. Tools that create geometry select their result.
 - UVs follow glTF: (0,0) is the top-left of the texture.
 - Colours can be `"#rrggbb"`, `"#rrggbbaa"`, a palette index such as `"p3"`, a name, or `[r,g,b,a]`.

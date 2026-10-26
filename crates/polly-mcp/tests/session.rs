@@ -57,7 +57,7 @@ fn model_a_crate() {
     let s = server();
     call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Crate"}));
     let sel = call(&s, "select", json!({"query": {"by": "normal", "direction": [0, 1, 0]}}));
-    assert_eq!(sel["selection"]["faces"].as_array().unwrap().len(), 1);
+    assert_eq!(sel["selection"]["counts"]["faces"], 1);
     let r = call(&s, "inset", json!({"thickness": 0.1, "depth": -0.05}));
     assert!(r.get("warnings").is_none(), "{r}");
     let r = call(&s, "bevel", json!({"elements": ["all"], "width": 0.02}));
@@ -98,7 +98,7 @@ fn unwrap_cube() {
     let r = call(&s, "auto_seams", json!({}));
     assert!(r["seams_marked"].as_u64().unwrap() > 0);
     let r = call(&s, "unwrap", json!({"texture_size": [64, 64]}));
-    assert!(r["overlapping_faces"].as_array().unwrap().is_empty(), "{r}");
+    assert_eq!(r["overlapping_faces"], "", "{r}");
     assert!(!r["islands"].as_array().unwrap().is_empty());
     call(&s, "uv_report", json!({}));
     call(&s, "transform_uvs", json!({"elements": ["f0"], "translate": [0.1, 0.0]}));
@@ -348,4 +348,51 @@ fn rig_pose_animate_export() {
     call(&s, "delete_bone", json!({"bone": "lower"}));
     let d = call(&s, "describe_clip", json!({"clip": "wave"}));
     assert_eq!(d["channels"].as_array().unwrap().len(), 1, "{d}"); // morph channel remains
+}
+
+/// Agent-feedback batch: compact id ranges in and out, named parts that
+/// survive joins and edits, match_transform.
+#[test]
+fn ranges_parts_and_match_transform() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "plane", "x_segments": 4, "z_segments": 4}, "name": "Body"}));
+    // selecting everything reports a compact range, not 16 ids
+    let sel = call(&s, "select", json!({"query": {"by": "all"}, "kind": "faces"}));
+    assert_eq!(sel["selection"]["faces"], "f0..f15", "{sel}");
+    // ranges and comma lists as input
+    let r = call(&s, "extrude", json!({"elements": ["f0..f3, f8"], "distance": 0.2}));
+    assert_eq!(r["result"]["faces"], "f0..f3, f8", "{r}");
+    let e = call_err(&s, "move", json!({"elements": ["f200..f300"], "offset": [0, 1, 0]}));
+    assert!(e.contains("f200..f300"), "{e}");
+
+    // join keeps part names; later edits keep them on new faces
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.5, 0.5, 0.5]}, "name": "Head", "position": [0, 1, 0]}));
+    let j = call(&s, "join_objects", json!({"objects": ["Body", "Head"]}));
+    assert!(j["parts"]["Head"].as_str().unwrap().contains(".."), "{j}");
+    let head = call(&s, "select", json!({"object": "Body", "query": {"by": "part", "name": "Head"}}));
+    assert_eq!(head["selection"]["counts"]["faces"], 6);
+    call(&s, "inset", json!({"object": "Body", "thickness": 0.05, "individual": true}));
+    let d = call(&s, "describe_mesh", json!({"object": "Body"}));
+    let head_after = call(&s, "select", json!({"object": "Body", "query": {"by": "part", "name": "Head"}}));
+    assert_eq!(head_after["selection"]["counts"]["faces"], 6 * 5, "inset ring faces inherit the part: {d}");
+    let e = call_err(&s, "select", json!({"object": "Body", "query": {"by": "part", "name": "Tail"}}));
+    assert!(e.contains("Head") && e.contains("Body"), "{e}");
+    call(&s, "set_part", json!({"object": "Body", "elements": ["f0"], "name": "Belt"}));
+    let faces = call(&s, "list_faces", json!({"object": "Body", "elements": ["f0"]}));
+    assert_eq!(faces["rows"][0]["part"], "Belt");
+
+    // match_transform copies world placement, also across parents
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Arm", "position": [2, 1, 0], "rotation": [0, 0, 30]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Holder", "position": [-1, 0, 0]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.3, 0.3, 0.3]}, "name": "Bracer", "parent": "Holder"}));
+    call(&s, "match_transform", json!({"object": "Bracer", "target": "Arm", "offset": [0, 0.5, 0]}));
+    let sc = call(&s, "describe_scene", json!({}));
+    let obj = |n: &str| sc["objects"].as_array().unwrap().iter().find(|o| o["name"] == n).unwrap().clone();
+    // Arm's +Y rotated 30 degrees about Z: offset (0,0.5,0) -> (-0.25, 0.433, 0) from (2,1,0)
+    let lo = obj("Bracer")["world_bounds"]["min"].clone();
+    let hi = obj("Bracer")["world_bounds"]["max"].clone();
+    let cx = (lo[0].as_f64().unwrap() + hi[0].as_f64().unwrap()) / 2.0;
+    let cy = (lo[1].as_f64().unwrap() + hi[1].as_f64().unwrap()) / 2.0;
+    assert!((cx - 1.75).abs() < 1e-3 && (cy - 1.433).abs() < 1e-3, "bracer centre {cx},{cy}");
+    assert_eq!(obj("Bracer")["parent"], "Holder");
 }

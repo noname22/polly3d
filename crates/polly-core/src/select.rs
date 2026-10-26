@@ -41,6 +41,8 @@ pub enum Query {
     Linked { seeds: Vec<String> },
     /// Faces using a material index.
     Material { index: u32 },
+    /// Faces of a named part (join_objects names parts after the joined objects; set_part labels faces).
+    Part { name: String },
     /// Open boundary edges.
     Boundary,
     /// Edges whose adjacent faces meet at more than `min_angle` degrees.
@@ -111,6 +113,16 @@ pub fn run(mesh: &Mesh, q: &Query, current: &Selection) -> Result<Selection> {
         }
         Query::Material { index } => {
             s.faces = mesh.faces.iter().filter(|(_, f)| f.material == *index).map(|(i, _)| *i).collect();
+        }
+        Query::Part { name } => {
+            s.faces = mesh.faces.iter().filter(|(_, f)| f.part.as_deref() == Some(name.as_str())).map(|(i, _)| *i).collect();
+            if s.faces.is_empty() {
+                let parts: BTreeSet<&str> = mesh.faces.values().filter_map(|f| f.part.as_deref()).collect();
+                return invalid(format!(
+                    "no part named '{name}' (parts: {})",
+                    if parts.is_empty() { "none".to_string() } else { parts.into_iter().collect::<Vec<_>>().join(", ") }
+                ));
+            }
         }
         Query::Boundary => s.edges = mesh.boundary_edges(),
         Query::Sharp { min_angle } => {

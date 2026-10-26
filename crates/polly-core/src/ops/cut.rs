@@ -52,10 +52,11 @@ pub fn connect_pair(mesh: &mut Mesh, a: VertId, b: VertId) -> Result<FaceId> {
         corners: idx.iter().map(|k| f.corners[*k]).collect(),
         material: f.material,
         smooth: f.smooth,
+        part: f.part.clone(),
     };
     mesh.faces.insert(id, pick(&first));
     let s = pick(&second);
-    mesh.add_face_with(s.verts, s.corners, s.material, s.smooth)
+    mesh.add_face_from(s.verts.clone(), s.corners.clone(), &s)
 }
 
 /// Connect a path of vertices pairwise (v0-v1, v1-v2, ...), splitting faces.
@@ -170,7 +171,7 @@ pub fn loop_cut(mesh: &mut Mesh, edge: Edge, cuts: u32, fraction: f32) -> Result
         mesh.remove_face(qid);
         for j in 0..ab.len() - 1 {
             let loopv = [ab[j], ab[j + 1], dc[j + 1], dc[j]];
-            mesh.add_face_with(loopv.iter().map(|x| x.0).collect(), loopv.iter().map(|x| x.1).collect(), f.material, f.smooth)?;
+            mesh.add_face_from(loopv.iter().map(|x| x.0).collect(), loopv.iter().map(|x| x.1).collect(), &f)?;
             if j > 0 {
                 out.edges.insert(Edge::new(ab[j].0, dc[j].0));
             }
@@ -212,7 +213,7 @@ pub fn subdivide(mesh: &mut Mesh, faces: &BTreeSet<FaceId>) -> Result<Selection>
             (mid[&Edge::new(a, b)], f.corners[i % n].lerp(&f.corners[(i + 1) % n], 0.5))
         };
         let mut add = |l: Vec<(VertId, Corner)>, mesh: &mut Mesh| -> Result<()> {
-            let id = mesh.add_face_with(l.iter().map(|x| x.0).collect(), l.iter().map(|x| x.1).collect(), f.material, f.smooth)?;
+            let id = mesh.add_face_from(l.iter().map(|x| x.0).collect(), l.iter().map(|x| x.1).collect(), &f)?;
             out.faces.insert(id);
             Ok(())
         };

@@ -46,7 +46,7 @@ pub fn tools() -> Vec<ToolDef> {
         def("set_active", "Make an object the active one (the default target of tools that take `object`).", false, set_active),
         def(
             "set_transform",
-            "Set an object's position, rotation (Euler XYZ degrees) and/or scale. With relative=true values are added (position/rotation) or multiplied (scale).",
+            "Set an object's position, rotation (Euler degrees, see `rotation`) and/or scale. With relative=true values are added (position/rotation) or multiplied (scale).",
             false,
             set_transform,
         ),
@@ -56,11 +56,17 @@ pub fn tools() -> Vec<ToolDef> {
             false,
             apply_transform,
         ),
+        def(
+            "match_transform",
+            "Place an object where another one is (world position/rotation/scale, respecting both objects' parents), optionally with an offset in the target's local space.",
+            false,
+            match_transform,
+        ),
         def("set_parent", "Parent an object to another (or unparent with parent = null).", false, set_parent),
         def("set_visible", "Show or hide an object (hidden objects are not rendered or exported).", false, set_visible),
         def(
             "join_objects",
-            "Merge several objects into the first one (geometry transformed into its space). The others are deleted.",
+            "Merge several objects into the first one (geometry transformed into its space). The others are deleted. Each object's faces become a named part (its object name), selectable with select {\"by\":\"part\"}.",
             false,
             join_objects,
         ),
@@ -191,7 +197,7 @@ struct AddPrimitive {
     /// Object name (made unique). Defaults to the shape kind.
     name: Option<String>,
     position: Option<[f32; 3]>,
-    /// Euler XYZ degrees.
+    /// Euler degrees [x, y, z]: R = Rx·Ry·Rz, i.e. Z is applied first, then Y, then X about the parent's axes (equivalently X, Y, Z about the object's own axes).
     rotation: Option<[f32; 3]>,
     scale: Option<[f32; 3]>,
     /// Parent object name.
@@ -319,7 +325,7 @@ fn set_active(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
 struct SetTransform {
     object: Option<String>,
     position: Option<[f32; 3]>,
-    /// Euler XYZ degrees.
+    /// Euler degrees [x, y, z]: R = Rx·Ry·Rz, i.e. Z is applied first, then Y, then X about the parent's axes (equivalently X, Y, Z about the object's own axes).
     rotation: Option<[f32; 3]>,
     /// Number for uniform scale or [x,y,z].
     scale: Option<Scalar3>,
@@ -422,12 +428,22 @@ fn join_objects(ctx: &mut Ctx, a: Join) -> Result<Out> {
     let ids = a.objects.iter().map(|n| ctx.doc.scene.resolve(Some(n))).collect::<polly_core::Result<Vec<_>>>()?;
     let target = ids[0];
     edit_scene(ctx, "join objects", |s| {
+        // Faces without a part keep their object's name as the part.
+        let label = |m: &mut polly_core::mesh::Mesh, name: &str| {
+            for f in m.faces.values_mut().filter(|f| f.part.is_none()) {
+                f.part = Some(name.to_string());
+            }
+        };
         let inv = s.world_matrix(target).inverse();
+        let tname = s.object(target)?.name.clone();
+        label(Arc::make_mut(&mut s.object_mut(target)?.mesh), &tname);
         for &other in &ids[1..] {
             if other == target {
                 continue;
             }
-            let mut m = (*s.object(other)?.mesh).clone();
+            let o = s.object(other)?;
+            let mut m = (*o.mesh).clone();
+            label(&mut m, &o.name.clone());
             m.transform(inv * s.world_matrix(other));
             Arc::make_mut(&mut s.object_mut(target)?.mesh).append(&m);
             s.remove_object(other)?;
@@ -435,7 +451,10 @@ fn join_objects(ctx: &mut Ctx, a: Join) -> Result<Out> {
         s.active = Some(target);
         Ok(())
     })?;
-    Ok(Out::json(object_summary(&ctx.doc.scene, target)))
+    let mut j = object_summary(&ctx.doc.scene, target);
+    j["parts"] = super::query::parts_json(&ctx.doc.scene.objects[&target].mesh);
+    j["hint"] = json!("each joined object is now a named part: select {\"by\":\"part\",\"name\":...}");
+    Ok(Out::json(j))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -592,7 +611,7 @@ struct ArrayArgs {
     /// Translation per step (object space).
     #[serde(default)]
     offset: [f32; 3],
-    /// Euler XYZ degrees per step, about `pivot`.
+    /// Rotation per step about `pivot`. Euler degrees [x, y, z]: R = Rx·Ry·Rz, i.e. Z is applied first, then Y, then X about the parent's axes (equivalently X, Y, Z about the object's own axes).
     #[serde(default)]
     rotation: [f32; 3],
     /// Pivot for rotation (object space, default origin).
@@ -647,4 +666,46 @@ fn array(ctx: &mut Ctx, a: ArrayArgs) -> Result<Out> {
         j["created"] = json!(created.iter().map(|c| s.objects[c].name.clone()).collect::<Vec<_>>());
     }
     super::view::maybe_preview(ctx, id, Out::json(j))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MatchTransform {
+    /// Object to move (default: active).
+    object: Option<String>,
+    /// Object whose placement to copy.
+    target: String,
+    #[serde(default = "yes")]
+    position: bool,
+    #[serde(default = "yes")]
+    rotation: bool,
+    #[serde(default)]
+    scale: bool,
+    /// Offset in the target's local space (e.g. [0, 0.2, 0] = a bit along the target's +Y).
+    offset: Option<[f32; 3]>,
+}
+
+fn match_transform(ctx: &mut Ctx, a: MatchTransform) -> Result<Out> {
+    let id = resolve(&ctx.doc.scene, &a.object)?;
+    let target = ctx.doc.scene.resolve(Some(&a.target))?;
+    if id == target {
+        bail!("object and target are the same");
+    }
+    edit_scene(ctx, "match transform", |s| {
+        let tw = s.world_matrix(target) * Mat4::from_translation(Vec3::from_array(a.offset.unwrap_or([0.0; 3])));
+        let (ts, tr, tt) = tw.to_scale_rotation_translation();
+        let (os, or, ot) = s.world_matrix(id).to_scale_rotation_translation();
+        let world = Mat4::from_scale_rotation_translation(
+            if a.scale { ts } else { os },
+            if a.rotation { tr } else { or },
+            if a.position { tt } else { ot },
+        );
+        let parent = s.object(id)?.parent.map(|p| s.world_matrix(p)).unwrap_or(Mat4::IDENTITY);
+        let (sc, r, t) = (parent.inverse() * world).to_scale_rotation_translation();
+        let tr = &mut s.object_mut(id)?.transform;
+        tr.translation = t;
+        tr.rotation = r;
+        tr.scale = sc;
+        Ok(())
+    })?;
+    super::view::maybe_preview(ctx, id, Out::json(object_summary(&ctx.doc.scene, id)))
 }

@@ -64,13 +64,18 @@ pub enum Primitive {
         #[serde(default = "six")]
         sides: u32,
     },
-    /// Revolve a profile of [radius, y] points around the Y axis.
+    /// Revolve a profile of [radius, y] points around the Y axis. The sweep
+    /// starts at `start_deg` measured from +X and turns towards +Z (clockwise
+    /// seen from above) for `degrees`; less than 360 leaves an opening.
     Lathe {
         profile: Vec<[f32; 2]>,
         #[serde(default = "eight")]
         segments: u32,
         #[serde(default = "full_turn")]
         degrees: f32,
+        /// Where the sweep starts: 0 = +X, 90 = +Z, 180 = -X, 270 = -Z.
+        #[serde(default)]
+        start_deg: f32,
     },
     /// Extrude a 2-D outline of [x, z] points (may be concave) along Y.
     Prism {
@@ -128,7 +133,7 @@ impl Primitive {
                         (radius_bottom + (radius_top - radius_bottom) * t, -height / 2.0 + height * t)
                     })
                     .collect();
-                Ok(revolve(&rows, *segments, TAU, *caps))
+                Ok(revolve(&rows, *segments, 0.0, TAU, *caps))
             }
             Primitive::UvSphere { radius, segments, rings } => {
                 if *segments < 3 || *rings < 2 {
@@ -141,7 +146,7 @@ impl Primitive {
                         (if i == 0 || i == *rings { 0.0 } else { radius * s }, radius * c)
                     })
                     .collect();
-                Ok(revolve(&rows, *segments, TAU, false))
+                Ok(revolve(&rows, *segments, 0.0, TAU, false))
             }
             Primitive::IcoSphere { radius, subdivisions } => {
                 if *subdivisions > 4 {
@@ -155,13 +160,13 @@ impl Primitive {
                 }
                 Ok(torus(*major_radius, *minor_radius, *segments, *sides))
             }
-            Primitive::Lathe { profile, segments, degrees } => {
+            Primitive::Lathe { profile, segments, degrees, start_deg } => {
                 if profile.len() < 2 || *segments < 2 {
                     return invalid("lathe needs >= 2 profile points and >= 2 segments");
                 }
                 let rows: Vec<(f32, f32)> = profile.iter().map(|p| (p[0].max(0.0), p[1])).collect();
                 let angle = degrees.clamp(1.0, 360.0).to_radians();
-                Ok(revolve(&rows, *segments, angle, false))
+                Ok(revolve(&rows, *segments, start_deg.to_radians(), angle, false))
             }
             Primitive::Prism { outline, height } => {
                 if outline.len() < 3 {
@@ -213,9 +218,10 @@ pub fn plane(size: Vec2, nx: u32, nz: u32) -> Mesh {
     m
 }
 
-/// Revolve rows of (radius, y) around Y. Rows with radius 0 become poles.
+/// Revolve rows of (radius, y) around Y, from angle `start` (radians, 0 = +X,
+/// turning towards +Z) through `angle`. Rows with radius 0 become poles.
 /// If `angle < TAU` the result is open (no wrap-around).
-fn revolve(rows: &[(f32, f32)], segments: u32, angle: f32, caps: bool) -> Mesh {
+fn revolve(rows: &[(f32, f32)], segments: u32, start: f32, angle: f32, caps: bool) -> Mesh {
     let mut m = Mesh::new();
     let full = (angle - TAU).abs() < 1e-4;
     let cols = if full { segments } else { segments + 1 };
@@ -228,7 +234,7 @@ fn revolve(rows: &[(f32, f32)], segments: u32, angle: f32, caps: bool) -> Mesh {
             } else {
                 (0..cols)
                     .map(|k| {
-                        let t = angle * k as f32 / segments as f32;
+                        let t = start + angle * k as f32 / segments as f32;
                         m.add_vert(Vec3::new(r * t.cos(), y, r * t.sin()))
                     })
                     .collect()
@@ -415,6 +421,18 @@ mod tests {
         let w = m.validate();
         assert!(w.is_empty(), "{w:?}");
         assert!(m.boundary_edges().is_empty());
+    }
+
+    #[test]
+    fn lathe_sweep_direction_and_start() {
+        let half = |start: f32| {
+            Primitive::Lathe { profile: vec![[1.0, 0.0], [1.0, 1.0]], segments: 4, degrees: 180.0, start_deg: start }.build().unwrap()
+        };
+        // 0..180 starting at +X sweeps through +Z: every vertex has z >= 0.
+        assert!(half(0.0).verts.values().all(|v| v.pos.z > -1e-5));
+        assert!(half(0.0).verts.values().any(|v| v.pos.z > 0.99));
+        // Starting at 180 (-X) the half goes through -Z instead.
+        assert!(half(180.0).verts.values().all(|v| v.pos.z < 1e-5));
     }
 
     #[test]

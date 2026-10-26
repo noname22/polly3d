@@ -7,7 +7,7 @@ use polly_core::scene::{ObjectId, Scene};
 use polly_uv::{PackOptions, Projection, TransformUv, UnwrapOptions};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::common::*;
 use crate::registry::{Ctx, Out, ToolDef, def};
@@ -120,6 +120,47 @@ struct Unwrap {
     texture_size: Option<[u32; 2]>,
     #[serde(default)]
     options: UnwrapOptions,
+    /// List every island (default: the 30 largest).
+    #[serde(default)]
+    detail: bool,
+}
+
+/// Islands listed in a report unless `detail` is set.
+const MAX_ISLANDS: usize = 30;
+
+/// Shrink a UV report for the agent: face id lists become ranges
+/// ("f400..f507"), and only the largest islands are listed unless `detail`.
+fn compact_report(j: &mut Value, detail: bool) {
+    let ids = |v: &Value| -> Vec<u32> {
+        v.as_array().into_iter().flatten().filter_map(|s| s.as_str()?.strip_prefix('f')?.parse().ok()).collect()
+    };
+    let compress = |v: &Value| {
+        let mut list = ids(v);
+        list.sort_unstable();
+        json!(polly_core::ids::compress("f", list))
+    };
+    if let Some(islands) = j.get_mut("islands").and_then(Value::as_array_mut) {
+        for isl in islands.iter_mut() {
+            let n = ids(&isl["faces"]).len();
+            isl["faces"] = compress(&isl["faces"]);
+            isl["face_count"] = json!(n);
+        }
+        let total = islands.len();
+        if !detail && total > MAX_ISLANDS {
+            islands.sort_by_key(|i| std::cmp::Reverse(i["face_count"].as_u64().unwrap_or(0)));
+            islands.truncate(MAX_ISLANDS);
+            j["islands_not_listed"] = json!(format!("{} smaller islands (pass detail: true to list all)", total - MAX_ISLANDS));
+        }
+        j["island_count"] = json!(total);
+    }
+    for key in ["overlapping_faces", "out_of_bounds_faces", "flipped_faces"] {
+        if let Some(v) = j.get(key).cloned() {
+            j[key] = compress(&v);
+        }
+    }
+    if let Some(w) = j.get_mut("worst_faces").and_then(Value::as_array_mut) {
+        w.truncate(8);
+    }
 }
 
 fn uv_edit(
@@ -128,6 +169,7 @@ fn uv_edit(
     ids: &Option<Vec<String>>,
     label: &str,
     size: Option<[u32; 2]>,
+    detail: bool,
     f: impl FnOnce(&mut polly_core::mesh::Mesh, &BTreeSet<FaceId>, [u32; 2]) -> polly_core::Result<polly_uv::UvReport>,
 ) -> Result<Out> {
     let id = resolve(&ctx.doc.scene, object)?;
@@ -139,6 +181,7 @@ fn uv_edit(
         f(Arc::make_mut(&mut o.mesh), &faces, size)
     })?;
     let mut j = serde_json::to_value(&report)?;
+    compact_report(&mut j, detail);
     j["texture_size"] = json!(size);
     j["hint"] = json!("render_uv_layout shows the islands over the texture");
     Ok(Out::json(j))
@@ -146,7 +189,7 @@ fn uv_edit(
 
 fn unwrap(ctx: &mut Ctx, a: Unwrap) -> Result<Out> {
     let mut o = a.options.clone();
-    uv_edit(ctx, &a.object, &a.elements, "unwrap", a.texture_size, |m, faces, size| {
+    uv_edit(ctx, &a.object, &a.elements, "unwrap", a.texture_size, a.detail, |m, faces, size| {
         o.pack.texture_size = size;
         polly_uv::unwrap(m, faces, &o)
     })
@@ -159,11 +202,14 @@ struct Pack {
     texture_size: Option<[u32; 2]>,
     #[serde(default)]
     options: PackOptions,
+    /// List every island (default: the 30 largest).
+    #[serde(default)]
+    detail: bool,
 }
 
 fn pack_uvs(ctx: &mut Ctx, a: Pack) -> Result<Out> {
     let mut o = a.options.clone();
-    uv_edit(ctx, &a.object, &a.elements, "pack uvs", a.texture_size, |m, faces, size| {
+    uv_edit(ctx, &a.object, &a.elements, "pack uvs", a.texture_size, a.detail, |m, faces, size| {
         o.texture_size = size;
         polly_uv::pack(m, faces, &o)
     })
@@ -174,6 +220,9 @@ struct Report {
     object: Option<String>,
     elements: Option<Vec<String>>,
     texture_size: Option<[u32; 2]>,
+    /// List every island (default: the 30 largest).
+    #[serde(default)]
+    detail: bool,
 }
 
 fn uv_report(ctx: &mut Ctx, a: Report) -> Result<Out> {
@@ -184,6 +233,7 @@ fn uv_report(ctx: &mut Ctx, a: Report) -> Result<Out> {
     let faces = sel.implied_faces(mesh);
     let size = a.texture_size.unwrap_or_else(|| texture_size(s, id, &faces));
     let mut j = serde_json::to_value(polly_uv::report(mesh, &faces, size))?;
+    compact_report(&mut j, a.detail);
     j["texture_size"] = json!(size);
     Ok(Out::json(j))
 }

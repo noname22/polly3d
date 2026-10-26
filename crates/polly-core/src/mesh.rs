@@ -61,6 +61,10 @@ pub struct Face {
     pub material: u32,
     #[serde(default)]
     pub smooth: bool,
+    /// Named part this face belongs to (e.g. "head" after joining objects).
+    /// Faces created from a face inherit its part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
 }
 
 impl Face {
@@ -159,16 +163,23 @@ impl Mesh {
         }
         let id = self.next_face;
         self.next_face += 1;
-        self.faces.insert(id, Face { verts, corners, material, smooth });
+        self.faces.insert(id, Face { verts, corners, material, smooth, part: None });
         Ok(id)
     }
 
-    /// Add a face copying material/smooth from a template face, with default corners
-    /// colored like the template's first corner.
+    /// Add a face taking material, smoothing and part from a template face.
+    pub fn add_face_from(&mut self, verts: Vec<VertId>, corners: Vec<Corner>, template: &Face) -> Result<FaceId> {
+        let id = self.add_face_with(verts, corners, template.material, template.smooth)?;
+        self.faces.get_mut(&id).unwrap().part = template.part.clone();
+        Ok(id)
+    }
+
+    /// Like [`add_face_from`](Self::add_face_from), with default corners
+    /// coloured like the template's first corner.
     pub fn add_face_like(&mut self, verts: Vec<VertId>, template: &Face) -> Result<FaceId> {
         let c = Corner { uv: Vec2::ZERO, color: template.corners.first().map_or(Vec4::ONE, |c| c.color) };
         let n = verts.len();
-        self.add_face_with(verts, vec![c; n], template.material, template.smooth)
+        self.add_face_from(verts, vec![c; n], template)
     }
 
     /// Append another mesh; returns old->new vertex id map.
@@ -180,7 +191,7 @@ impl Mesh {
         let mut faces = Vec::new();
         for f in other.faces.values() {
             let verts = f.verts.iter().map(|v| vmap[v]).collect();
-            faces.push(self.add_face_with(verts, f.corners.clone(), f.material, f.smooth).unwrap());
+            faces.push(self.add_face_from(verts, f.corners.clone(), f).unwrap());
         }
         for e in &other.seams {
             self.seams.insert(Edge::new(vmap[&e.0], vmap[&e.1]));

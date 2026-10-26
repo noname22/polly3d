@@ -39,8 +39,7 @@ fn detach_region(mesh: &mut Mesh, region: &BTreeSet<FaceId>) -> (HashMap<VertId,
         let face = &mesh.faces[&f];
         let (ia, ib) = (face.index_of(a).unwrap(), face.index_of(b).unwrap());
         let (ca, cb) = (face.corners[ia], face.corners[ib]);
-        let (mat, smooth) = (face.material, face.smooth);
-        sides.push((vec![a, b, dup[&b], dup[&a]], vec![ca, cb, cb, ca], mat, smooth));
+        sides.push((vec![a, b, dup[&b], dup[&a]], vec![ca, cb, cb, ca], face.clone()));
     }
     for f in region {
         let face = mesh.faces.get_mut(f).unwrap();
@@ -50,11 +49,11 @@ fn detach_region(mesh: &mut Mesh, region: &BTreeSet<FaceId>) -> (HashMap<VertId,
             }
         }
     }
-    for (verts, mut corners, mat, smooth) in sides {
+    for (verts, mut corners, template) in sides {
         for c in corners.iter_mut() {
             c.uv = glam::Vec2::ZERO;
         }
-        mesh.add_face_with(verts, corners, mat, smooth).unwrap();
+        mesh.add_face_from(verts, corners, &template).unwrap();
     }
     (dup, boundary)
 }

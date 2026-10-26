@@ -32,9 +32,14 @@ impl Out {
     pub fn into_content(self) -> Vec<ContentBlock> {
         let mut c = vec![];
         if !self.json.is_null() {
+            // Pretty JSON reads best, but on large results the indentation
+            // is mostly wasted tokens: fall back to compact JSON.
             let text = match &self.json {
                 Value::String(s) => s.clone(),
-                v => serde_json::to_string_pretty(v).unwrap_or_default(),
+                v => {
+                    let pretty = serde_json::to_string_pretty(v).unwrap_or_default();
+                    if pretty.len() > 2000 { serde_json::to_string(v).unwrap_or_default() } else { pretty }
+                }
             };
             c.push(ContentBlock::text(text));
         }
