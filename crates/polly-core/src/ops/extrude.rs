@@ -192,6 +192,52 @@ pub fn inset_faces(
     Ok(Selection { faces: faces.clone(), ..Default::default() })
 }
 
+/// Give a sheet of faces thickness: add an inner layer offset along the
+/// (region-averaged) normals and close the open borders with rim quads.
+/// `offset` places the result: -1 grows inward (behind the faces), 0 centres
+/// the thickness on the original surface, 1 grows outward. Returns all faces
+/// of the thickened sheet.
+pub fn solidify(mesh: &mut Mesh, faces: &BTreeSet<FaceId>, thickness: f32, offset: f32) -> Result<Selection> {
+    check_faces(mesh, faces)?;
+    if thickness == 0.0 {
+        return invalid("thickness must not be 0");
+    }
+    let o = offset.clamp(-1.0, 1.0);
+    let normals = region_vertex_normals(mesh, faces);
+    let mut count: HashMap<Edge, u32> = HashMap::new();
+    for f in faces {
+        for e in mesh.faces[f].edges() {
+            *count.entry(e).or_default() += 1;
+        }
+    }
+    // Inner copies of every vertex of the region.
+    let verts: BTreeSet<VertId> = faces.iter().flat_map(|f| mesh.faces[f].verts.clone()).collect();
+    let mut inner = HashMap::new();
+    for &v in &verts {
+        let n = normals[&v];
+        let p = mesh.pos(v);
+        inner.insert(v, mesh.add_vert(p - n * thickness * (1.0 - o) / 2.0));
+        mesh.verts.get_mut(&v).unwrap().pos = p + n * thickness * (1.0 + o) / 2.0;
+    }
+    let mut out = Selection { faces: faces.clone(), ..Default::default() };
+    for &fid in faces {
+        let f = mesh.faces[&fid].clone();
+        // Inner face: same loop, reversed so it faces the other way.
+        let mut iv: Vec<VertId> = f.verts.iter().map(|v| inner[v]).collect();
+        let mut ic = f.corners.clone();
+        iv.reverse();
+        ic.reverse();
+        out.faces.insert(mesh.add_face_from(iv, ic, &f)?);
+        // Rims along the sheet's open borders.
+        for (a, b) in f.half_edges() {
+            if count[&Edge::new(a, b)] == 1 {
+                out.faces.insert(mesh.add_face_like(vec![b, a, inner[&a], inner[&b]], &f)?);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +285,21 @@ mod tests {
         inset_faces(&mut m, &all, 0.1, 0.1, false).unwrap();
         assert_eq!(m.faces.len(), 4 + 8);
         assert!(m.validate().is_empty(), "{:?}", m.validate());
+    }
+
+    #[test]
+    fn solidify_plane_is_closed_box() {
+        let mut m = crate::primitives::plane(glam::Vec2::ONE, 2, 2);
+        let all: BTreeSet<_> = m.faces.keys().copied().collect();
+        solidify(&mut m, &all, 0.1, -1.0).unwrap();
+        // 4 top + 4 bottom + 8 rim quads, closed and consistently wound
+        assert_eq!(m.faces.len(), 16);
+        assert!(m.boundary_edges().is_empty());
+        assert!(m.validate().is_empty(), "{:?}", m.validate());
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((lo.y + 0.1).abs() < 1e-6 && hi.y.abs() < 1e-6, "{lo} {hi}");
+        // outward normals: the top faces still face +Y
+        assert!(m.faces.values().filter(|f| m.face_center(f).y > -1e-6).all(|f| m.face_normal(f).y > 0.99 || m.face_normal(f).y.abs() < 1e-3));
     }
 
     #[test]

@@ -8,20 +8,27 @@ use polly_core::ops::{bevel, cut, extrude, topology, transform};
 use polly_core::select::edge_arg;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::json;
 
 use super::common::*;
 use crate::registry::{Ctx, Out, ToolDef, def};
 
 pub fn tools() -> Vec<ToolDef> {
     vec![
-        def("move", "Translate elements (verts/edges/faces) by an offset in object space.", false, move_),
+        def("move", "Translate elements (verts/edges/faces) by an offset in object space. With `falloff` (soft selection) nearby vertices follow partially.", false, move_),
         def(
             "rotate",
-            "Rotate elements by Euler degrees (see `rotation`), or by `angle` degrees around `axis`, about a pivot.",
+            "Rotate elements by Euler degrees (see `rotation`), or by `angle` degrees around `axis`, about a pivot. Supports soft selection (`falloff`).",
             false,
             rotate,
         ),
-        def("scale", "Scale elements about a pivot (uniform number or [x,y,z]). Use 0 on an axis to flatten.", false, scale),
+        def("scale", "Scale elements about a pivot (uniform number or [x,y,z]). Use 0 on an axis to flatten. Supports soft selection (`falloff`).", false, scale),
+        def(
+            "solidify",
+            "Give single-sided faces (a sheet: hair, cloth, skirt, leaves) thickness: adds an inner layer and closes the open borders. offset -1 grows behind the faces (default), 0 centres, 1 grows outward.",
+            false,
+            solidify,
+        ),
         def("set_position", "Set absolute coordinates of elements' vertices; omitted axes are unchanged (e.g. flatten to y=0).", false, set_position),
         def("snap", "Snap vertex positions to a grid step.", false, snap),
         def(
@@ -62,13 +69,54 @@ struct Move {
     /// Element ids like ["f1","v3","e2-5"], ranges like "f400..f507", comma lists in one string, "all", or "selection" (default: current selection).
     elements: Option<Vec<String>>,
     offset: [f32; 3],
+    #[serde(flatten)]
+    soft: Soft,
+}
+
+/// Soft selection: also move nearby vertices, fading out with distance.
+#[derive(Deserialize, JsonSchema, Default)]
+struct Soft {
+    /// Soft-selection radius in object units: vertices within it follow partially, fading to 0 at the radius. Good for organic shaping.
+    falloff: Option<f32>,
+    /// smooth (default), linear, sharp (mostly the nearest vertices) or root (broad bulge).
+    #[serde(default)]
+    falloff_curve: transform::Falloff,
+    /// Measure the radius along the mesh surface (edges), so nearby but unattached parts are not affected.
+    #[serde(default)]
+    connected: bool,
+}
+
+impl Soft {
+    /// Per-vertex weights, or None when soft selection is off.
+    fn weights(&self, m: &polly_core::mesh::Mesh, vs: &BTreeSet<polly_core::mesh::VertId>) -> Option<std::collections::BTreeMap<polly_core::mesh::VertId, f32>> {
+        let r = self.falloff.filter(|r| *r > 0.0)?;
+        Some(transform::soft_weights(m, vs, r, self.falloff_curve, self.connected))
+    }
+}
+
+/// Note how many extra vertices soft selection moved.
+fn soft_note(mut out: Out, selected: usize, affected: Option<usize>) -> Out {
+    if let Some(n) = affected {
+        out.json["soft_selection"] = json!({"selected_verts": selected, "also_moved": n.saturating_sub(selected)});
+    }
+    out
 }
 
 fn move_(ctx: &mut Ctx, a: Move) -> Result<Out> {
-    edit_mesh(ctx, &a.object, Some(&a.elements), "move", |m, s| {
-        transform::translate(m, &s.touched_verts(m), Vec3::from_array(a.offset))?;
+    let (mut sel, mut aff) = (0, None);
+    let out = edit_mesh(ctx, &a.object, Some(&a.elements), "move", |m, s| {
+        let vs = s.touched_verts(m);
+        sel = vs.len();
+        match a.soft.weights(m, &vs) {
+            Some(w) => {
+                aff = Some(w.len());
+                transform::translate_weighted(m, &w, Vec3::from_array(a.offset));
+            }
+            None => transform::translate(m, &vs, Vec3::from_array(a.offset))?,
+        }
         Ok(s.clone())
-    })
+    })?;
+    Ok(soft_note(out, sel, aff))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -82,6 +130,8 @@ struct Rotate {
     angle: Option<f32>,
     /// "center" (default), "centroid", "origin", or [x,y,z].
     pivot: Option<Pivot>,
+    #[serde(flatten)]
+    soft: Soft,
 }
 
 fn rotate(ctx: &mut Ctx, a: Rotate) -> Result<Out> {
@@ -91,12 +141,21 @@ fn rotate(ctx: &mut Ctx, a: Rotate) -> Result<Out> {
         _ => anyhow::bail!("give `rotation` [x,y,z] degrees, or `axis` and `angle`"),
     };
     let piv = a.pivot.clone();
-    edit_mesh(ctx, &a.object, Some(&a.elements), "rotate", |m, s| {
+    let (mut sel, mut aff) = (0, None);
+    let out = edit_mesh(ctx, &a.object, Some(&a.elements), "rotate", |m, s| {
         let vs = s.touched_verts(m);
+        sel = vs.len();
         let p = pivot(m, &vs, &piv).map_err(|e| polly_core::Error::Invalid(e.to_string()))?;
-        transform::rotate(m, &vs, q, p)?;
+        match a.soft.weights(m, &vs) {
+            Some(w) => {
+                aff = Some(w.len());
+                transform::rotate_weighted(m, &w, q, p);
+            }
+            None => transform::rotate(m, &vs, q, p)?,
+        }
         Ok(s.clone())
-    })
+    })?;
+    Ok(soft_note(out, sel, aff))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -105,16 +164,27 @@ struct Scale {
     elements: Option<Vec<String>>,
     factor: Scalar3,
     pivot: Option<Pivot>,
+    #[serde(flatten)]
+    soft: Soft,
 }
 
 fn scale(ctx: &mut Ctx, a: Scale) -> Result<Out> {
     let piv = a.pivot.clone();
-    edit_mesh(ctx, &a.object, Some(&a.elements), "scale", |m, s| {
+    let (mut sel, mut aff) = (0, None);
+    let out = edit_mesh(ctx, &a.object, Some(&a.elements), "scale", |m, s| {
         let vs = s.touched_verts(m);
+        sel = vs.len();
         let p = pivot(m, &vs, &piv).map_err(|e| polly_core::Error::Invalid(e.to_string()))?;
-        transform::scale(m, &vs, a.factor.vec(), p)?;
+        match a.soft.weights(m, &vs) {
+            Some(w) => {
+                aff = Some(w.len());
+                transform::scale_weighted(m, &w, a.factor.vec(), p);
+            }
+            None => transform::scale(m, &vs, a.factor.vec(), p)?,
+        }
         Ok(s.clone())
-    })
+    })?;
+    Ok(soft_note(out, sel, aff))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -585,4 +655,23 @@ fn set_part(ctx: &mut Ctx, a: SetPart) -> Result<Out> {
         }
         Ok(Selection { faces, ..Default::default() })
     })
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Solidify {
+    object: Option<String>,
+    /// Faces of the sheet (default: current selection; "all" for the whole object).
+    elements: Option<Vec<String>>,
+    thickness: f32,
+    /// -1 = grow behind the faces (default), 0 = centred, 1 = grow outward.
+    #[serde(default = "minus_one")]
+    offset: f32,
+}
+
+fn minus_one() -> f32 {
+    -1.0
+}
+
+fn solidify(ctx: &mut Ctx, a: Solidify) -> Result<Out> {
+    edit_mesh(ctx, &a.object, Some(&a.elements), "solidify", |m, s| extrude::solidify(m, &s.implied_faces(m), a.thickness, a.offset))
 }

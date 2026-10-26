@@ -37,7 +37,10 @@ Conventions
 Workflow that works well
 1. Block out with primitives (add_primitive), keep segment counts low.
 2. Look: render (view persp/front/right/top, overlays face_ids) or render_contact_sheet. Check ids before editing.
-3. Refine with select (by normal / box / loops) + extrude, inset, bevel, loop_cut, move/scale. Render again after each meaningful change.
+3. Refine with select (by normal / box / loops / part) + extrude, inset, bevel, loop_cut, move/scale. Render again after each meaningful change.
+   - Organic shaping: move/rotate/scale with `falloff` (soft selection; `connected: true` to leave nearby separate parts alone).
+   - Single-sided sheets (hair, cloth, leaves): solidify to give them thickness.
+   - Symmetric parts: build one side, then mirror_object for the other (names swap .L/.R), or mirror for a symmetric single mesh.
 4. UV: mark seams (or auto_seams), unwrap with a small texture size (e.g. 64x64) and pixel snapping; inspect with render_uv_layout.
 5. Paint: create_texture (optionally palette-locked), assign it through a material, fill_faces / draw / paint_stroke, check render.
 6. save_project, export_glb.

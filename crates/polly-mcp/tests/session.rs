@@ -396,3 +396,57 @@ fn ranges_parts_and_match_transform() {
     assert!((cx - 1.75).abs() < 1e-3 && (cy - 1.433).abs() < 1e-3, "bracer centre {cx},{cy}");
     assert_eq!(obj("Bracer")["parent"], "Holder");
 }
+
+/// Modelling batch: solidify, soft selection, mirror_object.
+#[test]
+fn solidify_soft_selection_mirror_object() {
+    let s = server();
+    // solidify: a skirt-like open sheet becomes a closed shell
+    call(&s, "add_primitive", json!({"shape": {"kind": "plane", "x_segments": 2, "z_segments": 2}, "name": "Sheet"}));
+    let r = call(&s, "solidify", json!({"elements": ["all"], "thickness": 0.05}));
+    assert!(r.get("warnings").is_none(), "{r}");
+    assert_eq!(call(&s, "describe_mesh", json!({}))["boundary_edges"], 0);
+
+    // soft move: a strip lifted at its centre falls off linearly
+    call(&s, "add_primitive", json!({"shape": {"kind": "plane", "size": [4, 1], "x_segments": 8, "z_segments": 1}, "name": "Strip"}));
+    call(&s, "select", json!({"query": {"by": "box", "min": [-0.01, -1, -1], "max": [0.01, 1, 1]}, "kind": "verts"}));
+    let r = call(&s, "move", json!({"offset": [0, 1, 0], "falloff": 1.0, "falloff_curve": "linear"}));
+    assert_eq!(r["soft_selection"]["also_moved"], 2 * 2, "{r}"); // x = ±0.5 rows (x = ±1.0 is at weight 0)
+    let verts = call(&s, "list_verts", json!({"elements": ["all"]}));
+    for row in verts["rows"].as_array().unwrap() {
+        let p = &row[1];
+        let (x, y) = (p[0].as_f64().unwrap(), p[1].as_f64().unwrap());
+        let expect = (1.0 - x.abs()).max(0.0);
+        assert!((y - expect).abs() < 1e-3, "x={x} y={y} expected {expect}");
+    }
+
+    // mirror_object: an off-centre, rotated, non-uniformly scaled part
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [0.3, 0.2, 0.6]}, "name": "Boot.L", "position": [0.3, 0.1, 0.2], "rotation": [0, 20, 10], "scale": [1, 2, 1]}));
+    let r = call(&s, "mirror_object", json!({"object": "Boot.L"}));
+    assert_eq!(r["name"], "Boot.R", "{r}");
+    let ws = s.workspace.get("main").unwrap();
+    let g = ws.lock().unwrap();
+    let sc = &g.doc.scene;
+    let find = |n: &str| *sc.objects.iter().find(|(_, o)| o.name == n).unwrap().0;
+    let (l, rr) = (find("Boot.L"), find("Boot.R"));
+    let world = |id: u32| -> Vec<polly_core::glam::Vec3> {
+        let m = sc.world_matrix(id);
+        sc.objects[&id].mesh.verts.values().map(|v| m.transform_point3(v.pos)).collect()
+    };
+    let (wl, wr) = (world(l), world(rr));
+    for p in &wl {
+        let q = polly_core::glam::Vec3::new(-p.x, p.y, p.z);
+        assert!(wr.iter().any(|x| x.distance(q) < 1e-4), "no mirrored vertex for {p}");
+    }
+    let mesh = &sc.objects[&rr].mesh;
+    assert!(mesh.validate().is_empty(), "{:?}", mesh.validate());
+    let m = sc.world_matrix(rr);
+    let centre = wr.iter().copied().sum::<polly_core::glam::Vec3>() / wr.len() as f32;
+    for f in mesh.faces.values() {
+        let pts: Vec<_> = f.verts.iter().map(|v| m.transform_point3(mesh.pos(*v))).collect();
+        let n = polly_core::mesh::newell_normal(&pts);
+        let c = pts.iter().copied().sum::<polly_core::glam::Vec3>() / pts.len() as f32;
+        assert!(n.dot(c - centre) > 0.0, "mirrored copy has an inward-facing face");
+    }
+    assert!(sc.objects[&rr].transform.scale.min_element() > 0.0);
+}

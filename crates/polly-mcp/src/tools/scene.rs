@@ -41,6 +41,12 @@ pub fn tools() -> Vec<ToolDef> {
             false,
             array,
         ),
+        def(
+            "mirror_object",
+            "Create a mirrored copy of an object across a world plane (default: through the origin), e.g. the right boot from the left one. Names swap left/right markers (Boot.L -> Boot.R, LeftArm -> RightArm); morphs and bones are mirrored too.",
+            false,
+            mirror_object,
+        ),
         def("delete_object", "Delete an object. Its children are re-parented to its parent.", false, delete_object),
         def("rename_object", "Rename an object.", false, rename_object),
         def("set_active", "Make an object the active one (the default target of tools that take `object`).", false, set_active),
@@ -708,4 +714,111 @@ fn match_transform(ctx: &mut Ctx, a: MatchTransform) -> Result<Out> {
         Ok(())
     })?;
     super::view::maybe_preview(ctx, id, Out::json(object_summary(&ctx.doc.scene, id)))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MirrorObject {
+    object: Option<String>,
+    /// World axis normal to the mirror plane: "x" (default: left/right), "y" or "z".
+    #[serde(default = "x_axis")]
+    axis: String,
+    /// A point on the mirror plane in world space (default: the origin).
+    about: Option<[f32; 3]>,
+    /// Name of the copy (default: left/right swapped, or "<name>.mirror").
+    name: Option<String>,
+}
+
+fn x_axis() -> String {
+    "x".into()
+}
+
+/// Swap left/right markers in a name: Boot.L -> Boot.R, LeftArm -> RightArm.
+pub fn mirror_name(name: &str) -> String {
+    for (a, b) in [("Left", "Right"), ("left", "right"), ("LEFT", "RIGHT")] {
+        if name.contains(a) {
+            return name.replace(a, b);
+        }
+        if name.contains(b) {
+            return name.replace(b, a);
+        }
+    }
+    for sep in ['.', '_', '-', ' '] {
+        for (a, b) in [('L', 'R'), ('l', 'r')] {
+            for (x, y) in [(a, b), (b, a)] {
+                if let Some(stem) = name.strip_suffix(&format!("{sep}{x}")) {
+                    return format!("{stem}{sep}{y}");
+                }
+                if let Some(rest) = name.strip_prefix(&format!("{x}{sep}")) {
+                    return format!("{y}{sep}{rest}");
+                }
+            }
+        }
+    }
+    format!("{name}.mirror")
+}
+
+fn mirror_object(ctx: &mut Ctx, a: MirrorObject) -> Result<Out> {
+    let id = resolve(&ctx.doc.scene, &a.object)?;
+    let axis = match a.axis.to_lowercase().as_str() {
+        "x" => Vec3::X,
+        "y" => Vec3::Y,
+        "z" => Vec3::Z,
+        other => bail!("axis must be x, y or z, not '{other}'"),
+    };
+    let new_id = edit_scene(ctx, "mirror object", |s| {
+        let o = s.object(id)?.clone();
+        let w = s.world_matrix(id);
+        // World reflection across the plane through `about` with normal `axis`.
+        let p = Vec3::from_array(a.about.unwrap_or([0.0; 3]));
+        let refl = Mat4::from_translation(p)
+            * Mat4::from_mat3(polly_core::glam::Mat3::IDENTITY - 2.0 * outer(axis))
+            * Mat4::from_translation(-p);
+        // Flip the local axis that is closest to the mirror axis in the mesh;
+        // the remaining reflection x rotation x flip is a proper rotation.
+        let k = (0..3).max_by(|&i, &j| w.col(i).truncate().normalize().dot(axis).abs().total_cmp(&w.col(j).truncate().normalize().dot(axis).abs())).unwrap();
+        let mut flip = Vec3::ONE;
+        flip[k] = -1.0;
+        let local_flip = Mat4::from_scale(flip);
+        let mut mesh = (*o.mesh).clone();
+        mesh.transform(local_flip);
+        for m in &mut mesh.morphs {
+            m.offsets.values_mut().for_each(|d| *d *= flip);
+        }
+        let world = refl * w * local_flip;
+        let parent = o.parent.map(|pid| s.world_matrix(pid)).unwrap_or(Mat4::IDENTITY);
+        let (sc, r, t) = (parent.inverse() * world).to_scale_rotation_translation();
+        let name = a.name.clone().unwrap_or_else(|| mirror_name(&o.name));
+        let nid = s.add_object(&name, mesh);
+        let n = s.object_mut(nid)?;
+        n.transform = polly_core::scene::Transform { translation: t, rotation: r, scale: sc };
+        n.parent = o.parent;
+        n.morph_weights = o.morph_weights.clone();
+        if let Some(mut sk) = o.skeleton.clone() {
+            for b in sk.bones.values_mut() {
+                b.head *= flip;
+                b.tail *= flip;
+                b.roll = -b.roll;
+                b.name = mirror_name(&b.name).trim_end_matches(".mirror").to_string();
+            }
+            n.skeleton = Some(sk);
+        }
+        Ok(nid)
+    })?;
+    super::view::maybe_preview(ctx, new_id, Out::json(object_summary(&ctx.doc.scene, new_id)))
+}
+
+fn outer(a: Vec3) -> polly_core::glam::Mat3 {
+    polly_core::glam::Mat3::from_cols(a * a.x, a * a.y, a * a.z)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mirror_name;
+
+    #[test]
+    fn mirror_names() {
+        for (a, b) in [("Boot.L", "Boot.R"), ("hand_r", "hand_l"), ("LeftArm", "RightArm"), ("R-ear", "L-ear"), ("Belt", "Belt.mirror")] {
+            assert_eq!(mirror_name(a), b);
+        }
+    }
 }
