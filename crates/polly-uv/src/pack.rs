@@ -26,11 +26,28 @@ pub struct PackOptions {
     pub texel_density: Option<f32>,
     /// Empty texels kept along the texture border.
     pub margin_px: u32,
+    /// Keep the islands' current relative sizes (e.g. after enlarging one by
+    /// hand) instead of evening out texel density by 3-D area.
+    pub keep_relative: bool,
+    /// Texel density multipliers per face (an island uses its largest): 2 gives
+    /// twice the texels per unit along each axis. Filled in by tools, e.g. per part.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub face_density: std::collections::BTreeMap<FaceId, f32>,
 }
 
 impl Default for PackOptions {
     fn default() -> Self {
-        PackOptions { texture_size: [64, 64], padding_px: 1, pixel_snap: true, rotate: true, texel_density: None, margin_px: 0 }
+        PackOptions {
+            texture_size: [64, 64],
+            padding_px: 1,
+            pixel_snap: true,
+            rotate: true,
+            texel_density: None,
+            margin_px: 0,
+            keep_relative: false,
+            face_density: Default::default(),
+        }
     }
 }
 
@@ -76,7 +93,9 @@ pub fn pack(mesh: &mut Mesh, faces: &BTreeSet<FaceId>, o: &PackOptions) -> Resul
             area_uv = areas(mesh, &island).0;
         }
         let (lo, hi) = crate::uv_bounds(mesh, &island);
-        let scale = if area_uv > 1e-12 && area_3d > 1e-12 { (area_3d / area_uv).sqrt() } else { 1.0 };
+        let even = if area_uv > 1e-12 && area_3d > 1e-12 { (area_3d / area_uv).sqrt() } else { 1.0 };
+        let weight = island.iter().filter_map(|f| o.face_density.get(f).copied()).reduce(f32::max).unwrap_or(1.0);
+        let scale = if o.keep_relative { 1.0 } else { even } * weight.clamp(0.05, 20.0);
         let size = ((hi - lo) * scale).max(Vec2::splat(1e-6));
         shapes.push(Shape { faces: island, origin: lo, scale, size });
     }

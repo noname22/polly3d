@@ -1,4 +1,5 @@
 pub mod anim;
+pub mod bvh;
 pub mod document;
 pub mod error;
 pub mod geom;

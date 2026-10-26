@@ -43,6 +43,9 @@ Workflow that works well
    - Symmetric parts: build one side, then mirror_object for the other (names swap .L/.R), or mirror for a symmetric single mesh.
 4. UV: mark seams (or auto_seams), unwrap with a small texture size (e.g. 64x64) and pixel snapping; inspect with render_uv_layout.
 5. Paint: create_texture (optionally palette-locked), assign it through a material, fill_faces / draw / paint_stroke, check render.
+   - unwrap/pack_uvs `density` gives important parts more texels ({"head": 2}).
+   - fill_faces with {"type":"noise3d"} for organic surfaces (no seams); stamp for buttons/eyes/rivets sized in metres; paint_stroke "dabs" + "mirror" for symmetric details.
+   - Finish with bake_shading (ao and/or height) for depth; use dither on palette-locked textures.
 6. save_project, export_glb.
 
 Rigging & animation (optional)

@@ -52,7 +52,7 @@ fn raster_tri(t: [Vec2; 3], w: u32, h: u32, mut f: impl FnMut(i32, i32, [f32; 3]
 }
 
 /// Rasterize one UV polygon; calls `f(x, y, corner_weights)` per covered texel.
-fn raster_poly(poly: &[[f32; 2]], w: u32, h: u32, mut f: impl FnMut(i32, i32, &[(usize, f32); 3])) {
+pub(crate) fn raster_poly(poly: &[[f32; 2]], w: u32, h: u32, mut f: impl FnMut(i32, i32, &[(usize, f32); 3])) {
     if poly.len() < 3 || w == 0 || h == 0 {
         return;
     }
@@ -111,7 +111,12 @@ pub enum Fill {
     },
     /// Ordered dither between `a` and `b`; `density` 0 = all `a`, 1 = all `b`.
     Dither { a: Rgba, b: Rgba, density: f32, pattern: Dither },
-    /// Value noise choosing among `colors`; `scale` = blob size in px.
+    /// Noise sampled on the model's 3-D surface: continuous across UV seams,
+    /// sized in world units, with octaves and contrast. Prefer this over `noise`
+    /// for organic surfaces (skin, stone, cloth).
+    Noise3d(crate::surface::Noise3d),
+    /// Value noise in texture space choosing among `colors`; `scale` = blob size in px
+    /// (breaks at UV seams; see `noise3d`).
     Noise {
         colors: Vec<Rgba>,
         #[serde(default)]
@@ -165,7 +170,7 @@ impl Fill {
     pub fn sample(&self, x: i32, y: i32) -> Option<Rgba> {
         match self {
             Fill::Solid { color } => Some(*color),
-            Fill::VertexColors | Fill::Gradient { .. } => None,
+            Fill::VertexColors | Fill::Gradient { .. } | Fill::Noise3d(_) => None,
             Fill::Dither { a, b, density, pattern } => Some(dither_pick(*a, *b, *density, *pattern, x, y)),
             Fill::Noise { colors, seed, scale } => noise_pick(colors, *seed, *scale, x, y),
             Fill::Checker { a, b, size_px } => {
@@ -250,6 +255,10 @@ pub fn fill_faces(tex: &mut Texture, mesh: &Mesh, faces: &BTreeSet<FaceId>, fill
             let mut m = Mask::empty(w, h);
             m.bits = buf.iter().map(Option::is_some).collect();
             apply(tex, &m, p, |x, y, _| buf[(y as u32 * w + x as u32) as usize].map(|c| from_f32(c.to_array())))
+        }
+        Fill::Noise3d(n) => {
+            let map = crate::surface::SurfaceMap::new(mesh, faces, w, h, grow_px);
+            crate::surface::noise3d(tex, &map, n, p)
         }
         _ => {
             let m = face_mask(w, h, &face_uv_polys(mesh, faces), grow_px);

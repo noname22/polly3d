@@ -226,3 +226,24 @@ fn options_deserialize_from_partial_json() {
     assert_eq!(t.scale, [1.0, 1.0]);
 }
 
+
+#[test]
+fn density_weights_enlarge_a_part() {
+    // Two equal cubes side by side; the second gets 2x density.
+    let mut m = polly_core::primitives::cube(glam::Vec3::ONE);
+    let mut b = polly_core::primitives::cube(glam::Vec3::ONE);
+    b.transform(glam::Mat4::from_translation(glam::Vec3::new(3.0, 0.0, 0.0)));
+    let (_, second) = m.append(&b);
+    let all: BTreeSet<_> = m.faces.keys().copied().collect();
+    crate::project(&mut m, &all, &crate::Projection::PerFace).unwrap();
+    let mut o = PackOptions { texture_size: [128, 128], pixel_snap: false, ..Default::default() };
+    o.face_density = second.iter().map(|f| (*f, 2.0)).collect();
+    crate::pack(&mut m, &all, &o).unwrap();
+    let uv_size = |f: &FaceId| {
+        let (lo, hi) = crate::uv_bounds(&m, &BTreeSet::from([*f]));
+        (hi - lo).x.max((hi - lo).y)
+    };
+    let first = *m.faces.keys().next().unwrap();
+    let ratio = uv_size(&second[0]) / uv_size(&first);
+    assert!((ratio - 2.0).abs() < 0.05, "ratio {ratio}");
+}

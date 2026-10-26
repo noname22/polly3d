@@ -450,3 +450,67 @@ fn solidify_soft_selection_mirror_object() {
     }
     assert!(sc.objects[&rr].transform.scale.min_element() > 0.0);
 }
+
+/// Texturing batch: per-part density, 3-D noise, baked shading, stamp,
+/// dabs with mirrored painting.
+#[test]
+fn texturing_batch() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube", "size": [1.0, 1.4, 0.7]}, "name": "Body"}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "uv_sphere", "radius": 0.45, "segments": 10, "rings": 7}, "name": "Head", "position": [0, 1.15, 0]}));
+    call(&s, "join_objects", json!({"objects": ["Body", "Head"]}));
+    call(&s, "auto_seams", json!({}));
+    call(&s, "create_texture", json!({"name": "Skin", "width": 128, "height": 128, "palette": "db32", "material": "M", "object": "Body"}));
+    call(&s, "unwrap", json!({"density": {"Head": 2.0}}));
+    // the head got about twice the texels per unit (4x per area) of the body
+    {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let m = &g.doc.scene.objects.values().next().unwrap().mesh;
+        let density = |part: &str| {
+            let (mut uv, mut a3) = (0.0, 0.0);
+            for f in m.faces.values().filter(|f| f.part.as_deref() == Some(part)) {
+                let p: Vec<_> = f.corners.iter().map(|c| c.uv.extend(0.0)).collect();
+                uv += polly_core::mesh::newell_vector(&p).length() / 2.0;
+                a3 += m.face_area(f);
+            }
+            uv / a3
+        };
+        let ratio = density("Head") / density("Body");
+        assert!(ratio > 3.0 && ratio < 5.0, "head/body area density ratio {ratio}");
+    }
+    call(&s, "fill_faces", json!({"elements": ["all"], "fill": {"type": "solid", "color": "p21"}}));
+    call(&s, "select", json!({"query": {"by": "part", "name": "Head"}}));
+    let n = call(&s, "fill_faces", json!({"elements": ["selection"], "fill": {"type": "noise3d", "colors": ["p3", "p4", "p5"], "scale": 0.15, "contrast": 1.4, "dither": "bayer4"}}));
+    assert!(n["pixels_changed"].as_u64().unwrap() > 50, "{n}");
+    let b = call(&s, "bake_shading", json!({"ao": {"samples": 16}, "height": {"strength": 0.3}}));
+    assert!(b["pixels_changed"].as_u64().unwrap() > 100, "{b}");
+    let r = s.call("render", json!({"view": "front"}));
+    if r.is_error == Some(true) {
+        eprintln!("skipping GPU part: {}", text(&r));
+        return;
+    }
+    // A button on the belly, then two eyes from one mirrored dab.
+    let st = call(&s, "stamp", json!({"pixel": [256, 330], "radius": 0.08, "color": "p8", "outline": "p0"}));
+    assert!(st["pixels_changed"].as_u64().unwrap() > 4, "{st}");
+    let mut eye = None;
+    for x in (200..256).rev().step_by(4) {
+        let h = call(&s, "pick", json!({"x": x, "y": 150}));
+        if h["object"] == "Body" && h["position"][0].as_f64().unwrap() < -0.08 {
+            eye = Some(x);
+            break;
+        }
+    }
+    let eye = eye.expect("no head surface left of centre");
+    let p = call(&s, "paint_stroke", json!({"points": [[eye, 150]], "mode": "dabs", "color": "p1", "radius_px": 2, "mirror": {}}));
+    assert_eq!(p["mirrored_hits"], 1, "{p}");
+    let stats = call(&s, "get_texture", json!({"texture": "Skin"}));
+    assert_eq!(stats["stats"]["palette_violations"], 0, "{stats}");
+    let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let r = s.call("render", json!({"view": "front", "overlays": {"wireframe": false, "grid": false, "selection": false}, "width": 400, "height": 400}));
+    std::fs::write(out.join("texturing_front.png"), &images(&r)[0]).unwrap();
+    let r = s.call("render", json!({"view": "persp", "overlays": {"wireframe": false, "selection": false}, "width": 400, "height": 400}));
+    std::fs::write(out.join("texturing_persp.png"), &images(&r)[0]).unwrap();
+    let t = s.call("get_texture", json!({"texture": "Skin", "scale": 3}));
+    std::fs::write(out.join("texturing_tex.png"), &images(&t)[0]).unwrap();
+}

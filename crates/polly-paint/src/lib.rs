@@ -13,6 +13,7 @@ pub mod io;
 pub mod mask;
 pub mod palette;
 pub mod quantize;
+pub mod surface;
 
 pub use canvas::{
     Blend, Dither, GradientDir, Paint, adjust, border, dither_fill, ellipse, flood_fill, gradient, line, noise, outline,
@@ -23,6 +24,7 @@ pub use faces::{Fill, bake_vertex_colors, face_mask, face_uv_polys, fill_faces, 
 pub use io::{TextureStats, from_png, stats, to_png};
 pub use mask::{FaceUv, Mask, Region};
 pub use quantize::{quantize, resize_nearest};
+pub use surface::{Ao, HeightShade, Noise3d, Shading, SurfaceMap, bake_shading, noise3d, stamp};
 
 #[cfg(test)]
 mod tests {

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -33,7 +33,12 @@ pub fn tools() -> Vec<ToolDef> {
             false,
             unwrap,
         ),
-        def("pack_uvs", "Re-pack existing UV islands (keeps their shapes) into the texture.", false, pack_uvs),
+        def(
+            "pack_uvs",
+            "Re-pack existing UV islands (keeps their shapes) into the texture. By default islands get even texel density; `density` gives parts more or less ({\"head\": 2}); options.keep_relative keeps the islands' current relative sizes.",
+            false,
+            pack_uvs,
+        ),
         def("uv_report", "Report UV islands, pixel rects, coverage, stretch, overlaps and texel density without changing anything.", true, uv_report),
         def("transform_uvs", "Move/scale/rotate the UVs of faces (e.g. to place an island on a specific texture area).", false, transform_uvs),
     ]
@@ -123,6 +128,9 @@ struct Unwrap {
     /// List every island (default: the 30 largest).
     #[serde(default)]
     detail: bool,
+    /// Texel density per part (or element ids): {"head": 2} gives the head twice the
+    /// texels per unit along each axis (4x the area); {"f40..f60": 0.5} halves it.
+    density: Option<BTreeMap<String, f32>>,
 }
 
 /// Islands listed in a report unless `detail` is set.
@@ -187,8 +195,33 @@ fn uv_edit(
     Ok(Out::json(j))
 }
 
+/// Per-face density multipliers from {part or element ids: weight}.
+fn face_density(scene: &Scene, id: ObjectId, density: &Option<BTreeMap<String, f32>>) -> Result<BTreeMap<FaceId, f32>> {
+    let mut out = BTreeMap::new();
+    let o = scene.object(id)?;
+    for (key, w) in density.iter().flatten() {
+        if *w <= 0.0 {
+            anyhow::bail!("density for '{key}' must be > 0");
+        }
+        let by_part: Vec<FaceId> = o.mesh.faces.iter().filter(|(_, f)| f.part.as_deref() == Some(key.as_str())).map(|(i, _)| *i).collect();
+        let faces = if by_part.is_empty() {
+            polly_core::ids::Selection::parse(std::slice::from_ref(key), &o.mesh, &o.selection)
+                .map_err(|e| anyhow::anyhow!("density key '{key}' is neither a part nor element ids: {e}"))?
+                .implied_faces(&o.mesh)
+                .into_iter()
+                .collect()
+        } else {
+            by_part
+        };
+        out.extend(faces.into_iter().map(|f| (f, *w)));
+    }
+    Ok(out)
+}
+
 fn unwrap(ctx: &mut Ctx, a: Unwrap) -> Result<Out> {
     let mut o = a.options.clone();
+    let id = resolve(&ctx.doc.scene, &a.object)?;
+    o.pack.face_density = face_density(&ctx.doc.scene, id, &a.density)?;
     uv_edit(ctx, &a.object, &a.elements, "unwrap", a.texture_size, a.detail, |m, faces, size| {
         o.pack.texture_size = size;
         polly_uv::unwrap(m, faces, &o)
@@ -205,10 +238,15 @@ struct Pack {
     /// List every island (default: the 30 largest).
     #[serde(default)]
     detail: bool,
+    /// Texel density per part (or element ids): {"head": 2} gives the head twice the
+    /// texels per unit along each axis (4x the area); {"f40..f60": 0.5} halves it.
+    density: Option<BTreeMap<String, f32>>,
 }
 
 fn pack_uvs(ctx: &mut Ctx, a: Pack) -> Result<Out> {
     let mut o = a.options.clone();
+    let id = resolve(&ctx.doc.scene, &a.object)?;
+    o.face_density = face_density(&ctx.doc.scene, id, &a.density)?;
     uv_edit(ctx, &a.object, &a.elements, "pack uvs", a.texture_size, a.detail, |m, faces, size| {
         o.texture_size = size;
         polly_uv::pack(m, faces, &o)

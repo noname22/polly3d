@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 
 use anyhow::{Context, Result, bail};
+use polly_core::glam::Vec3;
 use polly_core::scene::{Filter, ObjectId, Scene};
 use polly_paint::{Blend, Rgba};
 use polly_render::{CameraInfo, Overlays, RenderOptions, Rendered, View};
@@ -41,7 +42,7 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         def(
             "paint_stroke",
-            "Paint on the model by pixel coordinates of the most recent render: each point is ray-cast onto the surface and the stroke is drawn into the hit faces' texture at the corresponding UVs. Points are interpolated so strokes are continuous.",
+            "Paint on the model by pixel coordinates of the most recent render: each point is ray-cast onto the surface and painted into the hit faces' texture. mode \"line\" (default) joins the points into a continuous stroke; \"dabs\" paints each point as a separate dot. `mirror` also paints the mirror image across a world plane (both eyes, both brows).",
             false,
             paint_stroke,
         ),
@@ -52,6 +53,12 @@ pub fn tools() -> Vec<ToolDef> {
             show_viewer,
         ),
         def("hide_viewer", "Close the live viewer window.", true, hide_viewer),
+        def(
+            "stamp",
+            "Stamp a disc or ring onto the model, sized in world units and continuous across UV seams: at a pixel of the last render, or at a point in the object's space. Optional outline. Good for buttons, studs, eyes, coins, rivets.",
+            false,
+            stamp,
+        ),
         def(
             "set_auto_preview",
             "Attach a small perspective preview image to the result of every geometry edit (size in px, 0 = off). Handy while iterating, costs image tokens.",
@@ -237,62 +244,155 @@ fn pick(ctx: &mut Ctx, a: Pick) -> Result<Out> {
     }
 }
 
+#[derive(Deserialize, JsonSchema, Default, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum StrokeMode {
+    /// Join the points into one continuous line (default).
+    #[default]
+    Line,
+    /// Paint each point as a separate dot (eyes, buttons, studs).
+    Dabs,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MirrorPaint {
+    /// World axis normal to the mirror plane (default "x": left/right symmetry).
+    #[serde(default = "x_axis")]
+    axis: String,
+    /// A point on the mirror plane (default: the world origin).
+    about: Option<[f32; 3]>,
+}
+
+fn x_axis() -> String {
+    "x".into()
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct Stroke {
-    /// Pixel coordinates in the last render, e.g. [[100,120],[140,128]]. One point = a dab.
+    /// Pixel coordinates in the last render, e.g. [[100,120],[140,128]].
     points: Vec<[f32; 2]>,
     color: Rgba,
     /// Brush radius in texture pixels (default 1).
     radius_px: Option<f32>,
     #[serde(default)]
     blend: Blend,
+    /// "line" (default) joins the points; "dabs" paints each point separately.
+    #[serde(default)]
+    mode: StrokeMode,
+    /// Also paint the mirror image across a world plane (e.g. both eyes from one stroke).
+    mirror: Option<MirrorPaint>,
+}
+
+/// One surface hit of a stroke sample.
+struct StrokeHit {
+    sample: usize,
+    object: ObjectId,
+    face: u32,
+    texture: u32,
+    uv: [f32; 2],
+}
+
+/// Group hits into UV polylines per texture: a new segment starts on a face
+/// change, a missed sample, or (dabs) every sample.
+fn stroke_segments(hits: &[StrokeHit], dabs: bool) -> Vec<(u32, Vec<[f32; 2]>)> {
+    let mut segments: Vec<(u32, Vec<[f32; 2]>)> = vec![];
+    let mut prev: Option<&StrokeHit> = None;
+    for h in hits {
+        let joins = !dabs && prev.is_some_and(|p| p.sample + 1 == h.sample && p.object == h.object && p.face == h.face && p.texture == h.texture);
+        match segments.last_mut() {
+            Some((_, pts)) if joins => pts.push(h.uv),
+            _ => segments.push((h.texture, vec![h.uv])),
+        }
+        prev = Some(h);
+    }
+    segments
 }
 
 fn paint_stroke(ctx: &mut Ctx, a: Stroke) -> Result<Out> {
     if a.points.is_empty() {
         bail!("no points");
     }
-    // Sample along the screen polyline every ~2px.
+    let dabs = a.mode == StrokeMode::Dabs;
+    // Lines are sampled along the screen polyline every ~2px; dabs are used as given.
     let mut samples = vec![a.points[0]];
     for w in a.points.windows(2) {
         let (p, q) = (w[0], w[1]);
+        if dabs {
+            samples.push(q);
+            continue;
+        }
         let n = (((q[0] - p[0]).hypot(q[1] - p[1])) / 2.0).ceil().max(1.0) as usize;
         for k in 1..=n {
             let t = k as f32 / n as f32;
             samples.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
         }
     }
-    // Group consecutive hits into UV polylines per texture; break on face changes
-    // across texture islands (different face => new segment).
-    let mut segments: Vec<(u32, Vec<[f32; 2]>)> = vec![];
-    let mut last: Option<(ObjectId, u32)> = None;
+    let mirror_axis = match a.mirror.as_ref().map(|m| m.axis.to_lowercase()) {
+        None => None,
+        Some(ax) => Some(match ax.as_str() {
+            "x" => Vec3::X,
+            "y" => Vec3::Y,
+            "z" => Vec3::Z,
+            other => bail!("mirror axis must be x, y or z, not '{other}'"),
+        }),
+    };
+    let s = last_scene(ctx);
+    let texture_of = |obj: ObjectId, face: u32| -> Option<u32> {
+        let f = s.objects.get(&obj)?.mesh.faces.get(&face)?;
+        s.materials.get(&f.material)?.texture
+    };
+    let mut hits = vec![];
+    let mut world_hits = vec![];
     let mut missed = 0;
-    {
-        let s = &last_scene(ctx);
-        for p in &samples {
-            let (cam, x, y) = camera_at(ctx, p[0], p[1])?;
-            let Some(h) = polly_render::pick(s, &cam, x, y) else {
-                missed += 1;
-                last = None;
-                continue;
-            };
-            let face = &s.objects[&h.object].mesh.faces[&h.face];
-            let Some(tid) = s.materials.get(&face.material).and_then(|m| m.texture) else {
-                missed += 1;
-                last = None;
-                continue;
-            };
-            let key = (h.object, h.face);
-            match segments.last_mut() {
-                Some((t, pts)) if *t == tid && last == Some(key) => pts.push(h.uv),
-                _ => segments.push((tid, vec![h.uv])),
-            }
-            last = Some(key);
-        }
+    for (i, p) in samples.iter().enumerate() {
+        let (cam, x, y) = camera_at(ctx, p[0], p[1])?;
+        let Some(h) = polly_render::pick(&s, &cam, x, y) else {
+            missed += 1;
+            continue;
+        };
+        let Some(tid) = texture_of(h.object, h.face) else {
+            missed += 1;
+            continue;
+        };
+        world_hits.push((i, Vec3::from(h.position)));
+        hits.push(StrokeHit { sample: i, object: h.object, face: h.face, texture: tid, uv: h.uv });
     }
-    if segments.is_empty() {
+    if hits.is_empty() {
         bail!("the stroke did not hit any textured surface");
     }
+    // Mirror: reflect each hit and paint the nearest surface point there.
+    let mut mirrored = vec![];
+    let mut mirror_missed = 0;
+    if let (Some(axis), Some(m)) = (mirror_axis, &a.mirror) {
+        let about = Vec3::from_array(m.about.unwrap_or([0.0; 3]));
+        let bvhs: Vec<(ObjectId, polly_core::bvh::Bvh)> = s
+            .objects
+            .iter()
+            .filter(|(_, o)| o.visible)
+            .map(|(id, o)| (*id, polly_core::bvh::Bvh::new(&o.mesh, s.world_matrix(*id))))
+            .collect();
+        let size = s.bounds().map_or(1.0, |(lo, hi)| (hi - lo).length());
+        for (i, p) in &world_hits {
+            let q = *p - 2.0 * (*p - about).dot(axis) * axis;
+            let best = bvhs
+                .iter()
+                .filter_map(|(id, b)| b.closest_point(q).map(|c| (*id, b, c)))
+                .min_by(|x, y| x.2.3.total_cmp(&y.2.3));
+            match best {
+                Some((obj, b, (tri, _, bary, d))) if d < size * 0.02 => {
+                    let t = &b.tris[tri];
+                    let uv = t.uv(&s.objects[&obj].mesh, bary).to_array();
+                    match texture_of(obj, t.face) {
+                        Some(tid) => mirrored.push(StrokeHit { sample: *i, object: obj, face: t.face, texture: tid, uv }),
+                        None => mirror_missed += 1,
+                    }
+                }
+                _ => mirror_missed += 1,
+            }
+        }
+    }
+    let mut segments = stroke_segments(&hits, dabs);
+    segments.extend(stroke_segments(&mirrored, dabs));
     let radius = a.radius_px.unwrap_or(1.0);
     let mut changed: BTreeMap<String, usize> = BTreeMap::new();
     edit_scene(ctx, "paint stroke", |s| {
@@ -305,9 +405,15 @@ fn paint_stroke(ctx: &mut Ctx, a: Stroke) -> Result<Out> {
         }
         Ok(())
     })?;
-    let mut j = json!({"pixels_changed": changed, "samples": samples.len()});
+    let mut j = json!({"pixels_changed": changed, "samples": samples.len(), "hits": hits.len()});
     if missed > 0 {
         j["missed_samples"] = json!(missed);
+    }
+    if a.mirror.is_some() {
+        j["mirrored_hits"] = json!(mirrored.len());
+        if mirror_missed > 0 {
+            j["mirror_missed"] = json!(format!("{mirror_missed} mirrored points had no textured surface nearby"));
+        }
     }
     Ok(Out::json(j))
 }
@@ -365,4 +471,80 @@ struct NoArgs {}
 fn hide_viewer(ctx: &mut Ctx, _: NoArgs) -> Result<Out> {
     ctx.services.viewer(None)?;
     Ok(ok("viewer window closed"))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Stamp {
+    /// Where: a pixel [x, y] of the last render...
+    pixel: Option<[f32; 2]>,
+    /// ...or a point in the object's local space (snapped to the nearest surface).
+    point: Option<[f32; 3]>,
+    /// Object for `point` (default: active).
+    object: Option<String>,
+    /// Radius in world units.
+    radius: f32,
+    /// Leave a hole of this radius (makes a ring). Default 0.
+    #[serde(default)]
+    inner_radius: f32,
+    color: Rgba,
+    /// Outline colour (drawn inside the edge).
+    outline: Option<Rgba>,
+    /// Outline width in world units (default 20% of the radius).
+    outline_width: Option<f32>,
+    /// Texture (default: the texture of the face under the stamp).
+    texture: Option<String>,
+    #[serde(default)]
+    blend: Blend,
+}
+
+fn stamp(ctx: &mut Ctx, a: Stamp) -> Result<Out> {
+    if a.radius <= 0.0 {
+        bail!("radius must be > 0");
+    }
+    // Resolve the stamp centre (object space), its surface normal and the shown mesh.
+    let (obj, center, normal, face, shown) = match (a.pixel, a.point) {
+        (Some([px, py]), None) => {
+            let (cam, x, y) = camera_at(ctx, px, py)?;
+            let s = last_scene(ctx);
+            let h = polly_render::pick(&s, &cam, x, y).context("nothing under that pixel")?;
+            let inv = s.world_matrix(h.object).inverse();
+            let c = inv.transform_point3(Vec3::from(h.position));
+            let n = inv.transform_vector3(Vec3::from(h.normal)).normalize_or_zero();
+            (h.object, c, n, h.face, s)
+        }
+        (None, Some(p)) => {
+            let s = polly_core::anim::pose_scene(&ctx.doc.scene, &[]);
+            let obj = resolve(&ctx.doc.scene, &a.object)?;
+            let bvh = polly_core::bvh::Bvh::new(&s.objects[&obj].mesh, polly_core::glam::Mat4::IDENTITY);
+            let (tri, q, _, _) = bvh.closest_point(Vec3::from_array(p)).context("object has no faces")?;
+            let t = bvh.tris[tri];
+            (obj, q, t.normal(), t.face, s)
+        }
+        _ => bail!("give either `pixel` or `point`"),
+    };
+    let doc = &ctx.doc.scene;
+    let tid = match &a.texture {
+        Some(t) => doc.resolve_texture(t)?,
+        None => {
+            let f = &doc.objects[&obj].mesh.faces[&face];
+            doc.materials.get(&f.material).and_then(|m| m.texture).context("the face there has no texture; pass `texture`")?
+        }
+    };
+    let faces = super::paint::faces_with_texture(doc, obj, tid);
+    let (w, h) = (doc.textures[&tid].width, doc.textures[&tid].height);
+    let map = polly_paint::SurfaceMap::new(&shown.objects[&obj].mesh, &faces, w, h, 1);
+    let outline = a.outline.map(|c| (c, a.outline_width.unwrap_or(a.radius * 0.2)));
+    let mut changed = 0;
+    let name = edit_scene(ctx, "stamp", |s| {
+        let palette = s.textures[&tid].palette.clone().and_then(|n| crate::colors::palette_named(s, &n));
+        let paint = polly_paint::Paint::new(a.color).with_blend(a.blend).with_palette(palette);
+        let t = s.texture_mut(tid)?;
+        changed = polly_paint::stamp(t, &map, center, normal, a.radius, a.inner_radius, a.color, outline, &paint);
+        Ok(t.name.clone())
+    })?;
+    let mut j = json!({"texture": name, "pixels_changed": changed, "center": round3(center)});
+    if changed == 0 {
+        j["note"] = json!("no texels within the radius; the stamp may be smaller than one texel (increase radius or texture size)");
+    }
+    Ok(Out::json(j))
 }

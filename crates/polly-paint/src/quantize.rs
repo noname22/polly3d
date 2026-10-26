@@ -30,7 +30,7 @@ pub fn quantize(tex: &mut Texture, palette: &[Rgba], dither: Dither) -> usize {
     changed
 }
 
-fn dithered(palette: &[Rgba], c: Rgba, dither: Dither, x: usize, y: usize) -> Rgba {
+pub(crate) fn dithered(palette: &[Rgba], c: Rgba, dither: Dither, x: usize, y: usize) -> Rgba {
     let (i1, c1) = nearest(palette, c);
     let second = palette
         .iter()

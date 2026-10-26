@@ -44,6 +44,12 @@ pub fn tools() -> Vec<ToolDef> {
             paint_region,
         ),
         def("paint_uv_stroke", "Brush stroke along a polyline in UV coordinates (0..1) with a round pixel brush.", false, paint_uv_stroke),
+        def(
+            "bake_shading",
+            "Bake depth into a texture: darken by ambient occlusion (creases, contact areas, inside corners) and/or by height (darker towards the bottom). Multiplies the existing colours of the faces' texels. On palette-locked textures each shade snaps to the palette, which gives hard bands; add \"dither\": \"bayer4\" for a graded retro look.",
+            false,
+            bake_shading,
+        ),
         def("quantize", "Snap all texture pixels to a palette, with optional ordered dithering.", false, quantize),
         def("bake_vertex_colors", "Rasterize faces' vertex colours into the texture.", false, bake_vertex_colors),
         def("import_texture", "Load a PNG file as a new texture.", false, import_texture),
@@ -583,4 +589,74 @@ fn export_texture(ctx: &mut Ctx, a: ExportTex) -> Result<Out> {
     let t = &s.textures[&s.resolve_texture(&a.texture)?];
     std::fs::write(&a.path, polly_paint::to_png(t)).with_context(|| format!("writing {}", a.path))?;
     Ok(ok(format!("wrote {}", a.path)))
+}
+
+/// Faces of `obj` whose material uses texture `tid`.
+pub fn faces_with_texture(scene: &Scene, obj: u32, tid: TextureId) -> BTreeSet<FaceId> {
+    let o = &scene.objects[&obj];
+    o.mesh
+        .faces
+        .iter()
+        .filter(|(_, f)| scene.materials.get(&f.material).and_then(|m| m.texture) == Some(tid))
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct BakeShading {
+    object: Option<String>,
+    /// Faces to shade (default: all faces using the texture).
+    elements: Option<Vec<String>>,
+    /// Texture (default: the object's textured material).
+    texture: Option<String>,
+    #[serde(flatten)]
+    shading: polly_paint::Shading,
+    /// What casts occlusion: "self" (default) or "scene" (all visible objects).
+    occluders: Option<String>,
+    /// Extend shading this many texels past UV island edges (default 1).
+    grow_px: Option<u32>,
+}
+
+fn bake_shading(ctx: &mut Ctx, a: BakeShading) -> Result<Out> {
+    if a.shading.ao.is_none() && a.shading.height.is_none() {
+        bail!("give ao (e.g. {{\"ao\":{{}}}}) and/or height (e.g. {{\"height\":{{}}}})");
+    }
+    let shown = polly_core::anim::pose_scene(&ctx.doc.scene, &[]);
+    let s = &ctx.doc.scene;
+    let id = resolve(s, &a.object)?;
+    let mesh = shown.objects[&id].mesh.clone();
+    let tid = match &a.texture {
+        Some(t) => s.resolve_texture(t)?,
+        None => texture_of_faces(s, id, &mesh.faces.keys().copied().collect())?,
+    };
+    let faces = match &a.elements {
+        Some(_) => elements(s, id, &a.elements)?.implied_faces(&mesh),
+        None => faces_with_texture(s, id, tid),
+    };
+    if faces.is_empty() {
+        bail!("no faces use that texture");
+    }
+    // Occluders in the object's local space.
+    let mut occ = (*mesh).clone();
+    match a.occluders.as_deref().unwrap_or("self") {
+        "self" => {}
+        "scene" => {
+            let inv = shown.world_matrix(id).inverse();
+            for (oid, o) in shown.objects.iter().filter(|(oid, o)| **oid != id && o.visible) {
+                let mut m = (*o.mesh).clone();
+                m.transform(inv * shown.world_matrix(*oid));
+                occ.append(&m);
+            }
+        }
+        other => bail!("occluders must be \"self\" or \"scene\", not '{other}'"),
+    }
+    let bvh = polly_core::bvh::Bvh::new(&occ, polly_core::glam::Mat4::IDENTITY);
+    let (w, h) = (s.textures[&tid].width, s.textures[&tid].height);
+    let map = polly_paint::SurfaceMap::new(&mesh, &faces, w, h, a.grow_px.unwrap_or(1));
+    let mut out = edit_texture(ctx, tid, "bake shading", |t, s| {
+        let p = tex_paint(s, tid, [0; 4], Blend::Replace);
+        polly_paint::bake_shading(t, &map, &bvh, &a.shading, &p)
+    })?;
+    out.json["faces"] = json!(faces.len());
+    Ok(out)
 }
