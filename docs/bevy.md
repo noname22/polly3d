@@ -87,13 +87,14 @@ pub fn apply_loadout(
         let Ok((name, extras, mut vis)) = nodes.get_mut(e) else { continue };
         let polly = extras.and_then(|x| serde_json::from_str::<Value>(&x.value).ok()).map(|j| j["polly"].clone());
         match polly {
-            // A variant's node: visible when its variant is chosen.
+            // A variant's node: visible when the slot's choice is one of its variants.
             Some(p) if p["slot"].is_string() => {
                 let chosen = loadout.0.get(p["slot"].as_str().unwrap()).map(String::as_str);
-                *vis = if chosen == p["variant"].as_str() { Visibility::Inherited } else { Visibility::Hidden };
+                let shown = p["variants"].as_array().into_iter().flatten().any(|v| v.as_str() == chosen);
+                *vis = if shown { Visibility::Inherited } else { Visibility::Hidden };
             }
             // A hideable part's node.
-            Some(p) if p["part"].is_string() => {
+            Some(p) if p["parts"].is_array() => {
                 *vis = if hidden_parts.contains(name.as_str()) { Visibility::Hidden } else { Visibility::Inherited };
             }
             _ => {}

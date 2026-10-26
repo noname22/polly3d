@@ -679,8 +679,8 @@ fn bake_shading(ctx: &mut Ctx, a: BakeShading) -> Result<Out> {
         let mut m = (*o.mesh).clone();
         m.transform(inv * src.world_matrix(*oid));
         occ.append(&m);
-        if let Some((slot, v)) = s.variant_of(*oid) {
-            swappable.push(format!("{} (slot '{slot}', variant '{v}')", o.name));
+        if let Some((slot, vs)) = s.variants_of(*oid) {
+            swappable.push(format!("{} (slot '{slot}', variant {})", o.name, vs.join(", ")));
         }
     }
     let bvh = polly_core::bvh::Bvh::new(&occ, polly_core::glam::Mat4::IDENTITY);

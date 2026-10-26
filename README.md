@@ -103,10 +103,17 @@ weights with `transfer_weights`.
 ## Gear slots and variants
 
 Swappable gear is organised in slots (`hair`, `head`, `weapon`...), each with
-variants: sets of objects, possibly empty (`none`). One variant per slot is
-active in Polly, and one is the default, meant to be visible when the
-exported model is loaded. A variant can hide named parts of other objects
-while active, such as a helmet hiding `hair_top`, to avoid poke-through.
+variants: sets of objects, possibly empty (`none`). An object can be in
+several variants of one slot (`suit` = blouse + blazer). One variant per slot
+is active in Polly, and one is the default, meant to be visible when the
+exported model is loaded. A variant can hide parts of other objects while
+active, such as a helmet hiding `hair_top`, to avoid poke-through.
+
+Clothing is made from the body: `shell` copies body faces into a new object
+pushed out along the normals (rigged like the body), `inflate` fattens or
+shrinks a surface, and `auto_hide` finds the skin a garment covers and hides
+it whenever the garment is shown. Overlapping garments each keep their own
+rule.
 Renders accept a variant choice, `render_variants` shows all options of a
 slot, and the viewer has a dropdown per slot (a preview that doesn't change
 the scene).

@@ -825,13 +825,13 @@ fn runtime_gear_export() {
     // 4. Variants: non-defaults hidden and tagged.
     let node_j = |name: &str| json["nodes"].as_array().unwrap().iter().find(|n| n["name"] == name).unwrap().clone();
     assert_eq!(node_j("HairLong")["extensions"]["KHR_node_visibility"]["visible"], false);
-    assert_eq!(node_j("HairLong")["extras"]["polly"], json!({"slot": "hair", "variant": "long", "default": false}));
+    assert_eq!(node_j("HairLong")["extras"]["polly"], json!({"slot": "hair", "variants": ["long"], "default": false}));
     assert!(node_j("HairShort").get("extensions").is_none());
     assert!(node_j("Helmet").get("extensions").is_none(), "helmet is the default head variant");
     // 5. The hideable part is its own node, hidden by default because the default (helmet) hides it.
     let part = node_j("HairShort.hair_top");
     assert_eq!(part["extensions"]["KHR_node_visibility"]["visible"], false, "{part}");
-    assert_eq!(part["extras"]["polly"], json!({"object": "HairShort", "part": "hair_top"}));
+    assert_eq!(part["extras"]["polly"], json!({"object": "HairShort", "parts": ["hair_top"]}));
     assert_eq!(parent_name["HairShort.hair_top"], "HairShort");
     // 6. Slot table on the scene; 7. extension used, never required.
     let slots = &json["scenes"][0]["extras"]["polly"];
@@ -1047,4 +1047,75 @@ fn animation_batch() {
     if r.is_error != Some(true) {
         assert_eq!(images(&r).len(), 1);
     }
+}
+
+/// Feedback batch 3: clothes from the body, auto-hidden skin, shared variants.
+#[test]
+fn clothing_batch() {
+    let s = server();
+    call(&s, "add_mesh", json!({"name": "Rig", "vertices": [], "faces": []}));
+    call(&s, "add_bone_chain", json!({"object": "Rig", "points": [[0, -1, 0], [0, 0, 0], [0, 1, 0]], "names": ["hips", "chest"]}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "segments": 8, "height_segments": 4, "height": 2.0, "radius_bottom": 0.4, "radius_top": 0.4}, "name": "Body"}));
+    call(&s, "bind_to_armature", json!({"object": "Body", "armature": "Rig"}));
+    call(&s, "auto_weights", json!({"object": "Body"}));
+    // Blouse: the upper half of the sides; blazer: from y = -0.5 up, further out.
+    call(&s, "select", json!({"object": "Body", "query": {"by": "box", "min": [-1, 0, -1], "max": [1, 0.99, 1]}, "kind": "faces"}));
+    let r = call(&s, "shell", json!({"object": "Body", "name": "Blouse", "offset": 0.02}));
+    assert_eq!(r["from_faces"], 16, "{r}");
+    assert_eq!(r["skinned_to"], "Rig", "the shell is rigged like the body: {r}");
+    call(&s, "select", json!({"object": "Body", "query": {"by": "box", "min": [-1, -0.5, -1], "max": [1, 0.99, 1]}, "kind": "faces"}));
+    call(&s, "shell", json!({"object": "Body", "name": "Blazer", "offset": 0.04}));
+    call(&s, "inflate", json!({"object": "Blazer", "elements": ["all"], "distance": 0.005, "keep_plane": {"point": [0, 0, 0], "normal": [1, 0, 0]}}));
+    // One object in several variants of a slot.
+    call(&s, "add_variant", json!({"slot": "top", "variant": "suit", "objects": ["Blouse", "Blazer"]}));
+    call(&s, "add_variant", json!({"slot": "top", "variant": "blouse", "objects": ["Blouse"]}));
+    call(&s, "add_variant", json!({"slot": "top", "variant": "blazer", "objects": ["Blazer"]}));
+    call(&s, "add_variant", json!({"slot": "top", "variant": "none"}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Hat"}));
+    call(&s, "add_variant", json!({"slot": "head", "variant": "hat", "objects": ["Hat"]}));
+    call_err(&s, "add_variant", json!({"slot": "head", "variant": "blouse_hat", "objects": ["Blouse"]}));
+    // Covered skin.
+    let r = call(&s, "auto_hide", json!({"garment": "Blouse", "body": "Body"}));
+    assert_eq!(r["hidden_faces"], 16, "{r}");
+    let r = call(&s, "auto_hide", json!({"garment": "Blazer", "body": "Body"}));
+    assert_eq!(r["hidden_faces"], 24, "{r}");
+    let visible_faces = |choice: Value| {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let c: std::collections::BTreeMap<String, String> = serde_json::from_value(choice).unwrap();
+        let v = polly_core::variants::variant_view(&g.doc.scene, &c);
+        let o = v.objects.values().find(|o| o.name == "Body").unwrap();
+        let shown = |n: &str| v.objects.values().find(|o| o.name == n).unwrap().visible;
+        (o.mesh.faces.len(), shown("Blouse"), shown("Blazer"))
+    };
+    // 8 sides x 4 rows + 2 caps = 34 faces.
+    assert_eq!(visible_faces(json!({"top": "none"})), (34, false, false));
+    assert_eq!(visible_faces(json!({"top": "blouse"})), (34 - 16, true, false));
+    assert_eq!(visible_faces(json!({"top": "blazer"})), (34 - 24, false, true));
+    assert_eq!(visible_faces(json!({"top": "suit"})), (34 - 24, true, true));
+    // Re-adding a variant keeps its auto_hide rules.
+    call(&s, "add_variant", json!({"slot": "top", "variant": "blouse", "objects": ["Blouse"]}));
+    assert_eq!(visible_faces(json!({"top": "blouse"})).0, 34 - 16);
+
+    // Export: the body's hidden faces split by which garments cover them.
+    let dir = std::env::temp_dir().join(format!("polly-clothes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("clothes.glb");
+    call(&s, "export_glb", json!({"path": path.to_str().unwrap()}));
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let j: Value = serde_json::from_slice(&bytes[20..20 + len]).unwrap();
+    let node = |name: &str| j["nodes"].as_array().unwrap().iter().find(|n| n["name"] == name).cloned().unwrap_or_else(|| panic!("no node {name}"));
+    let both = node("Body.under_Blazer+under_Blouse");
+    assert_eq!(both["extras"]["polly"]["parts"], json!(["under_Blazer", "under_Blouse"]));
+    assert!(node("Body.under_Blazer").get("extras").is_some());
+    // Default "suit" shows both garments and hides everything they cover.
+    assert_eq!(node("Blouse")["extras"]["polly"], json!({"slot": "top", "variants": ["suit", "blouse"], "default": true}));
+    assert!(node("Blouse").get("extensions").is_none());
+    assert_eq!(both["extensions"]["KHR_node_visibility"]["visible"], false);
+    let hides = &j["scenes"][0]["extras"]["polly"]["slots"]["top"]["hides"];
+    let nodes_of = |v: &str| hides[v].as_array().unwrap().iter().map(|e| e[2].as_str().unwrap().to_string()).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(nodes_of("blouse"), ["Body.under_Blazer+under_Blouse".to_string()].into());
+    assert_eq!(nodes_of("blazer"), ["Body.under_Blazer".to_string(), "Body.under_Blazer+under_Blouse".to_string()].into());
 }

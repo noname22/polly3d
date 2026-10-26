@@ -15,6 +15,8 @@ Rig                      armature: the object with the skeleton
 │       └── HairShort
 │           └── HairShort.hair_top   a hideable part: its own node and mesh
 ├── Body                 skinned meshes: children of the armature, identity transform
+│   ├── Body.under_Blouse+under_Blazer   skin covered by both garments
+│   └── Body.under_Blazer                skin covered only by the blazer
 └── Skirt
 ```
 
@@ -24,7 +26,9 @@ Rig                      armature: the object with the skeleton
   - Skinned meshes store their vertices in the armature's space. Per the glTF spec, a skinned mesh node's own transform doesn't affect it; Polly places those nodes under the armature with an identity transform anyway.
   - Vertices without usable weights are bound to an extra joint, `<armature>_root`, which is never animated.
 - **Bone-attached gear** (helmets, weapons) is a child of its joint node, so it follows the bone when animated.
-- **Hideable parts:** any part that some variant hides becomes a separate child node named `<object>.<part>`. It has its own mesh, the same skin, and the same morph targets. Hiding that node hides just the part.
+- **Hideable parts:** faces that some variant hides become separate child nodes, with their own mesh, the same skin and the same morph targets. Hiding such a node hides just those faces.
+  - Faces are grouped by *which hide rules* cover them. A node is named `<object>.<rule>`, or `<object>.<rule1>+<rule2>` for faces that several rules hide (skin under both a blouse and a blazer).
+  - A rule is a labelled part (`hair_top`) or a face set found by `auto_hide` (`under_Blouse`).
 - **Animations:** every clip is a glTF animation.
   - Bone channels target joint nodes.
   - Morph-weight channels target the object's node and its part nodes.
@@ -53,14 +57,18 @@ other tools.
 ### On each variant's node
 
 ```json
-"extras": { "polly": { "slot": "hair", "variant": "long", "default": false } }
+"extras": { "polly": { "slot": "top", "variants": ["blouse", "suit"], "default": true } }
 ```
+
+An object can belong to several variants of one slot (a blouse is in both `blouse` and `suit`). `variants` lists them all, and `default` says whether the slot's default variant includes the object.
 
 ### On each hideable part's node
 
 ```json
-"extras": { "polly": { "object": "HairShort", "part": "hair_top" } }
+"extras": { "polly": { "object": "Body", "parts": ["under_Blazer", "under_Blouse"] } }
 ```
+
+`parts` lists the hide rules that cover this node's faces.
 
 ### On the scene (`scenes[0].extras`)
 
@@ -82,13 +90,13 @@ other tools.
 ```
 
 - **`variants`:** maps each variant to the **node names** of its objects. A variant can be empty (`none`).
-- **`hides`:** maps a variant to the parts it hides while chosen, as `[object, part, part node name]`.
+- **`hides`:** maps a variant to the nodes it hides while chosen, as `[object, rule, node name]`. A rule whose faces overlap other rules appears once per node.
 
 ### Showing a loadout
 
 To show a choice of one variant per slot:
 
-1. For every slot, show the nodes of the chosen variant and hide the nodes of the other variants.
+1. For every slot, show the nodes of the chosen variant's objects and hide the slot's other variant nodes. A node with `variants` is shown when that list contains the slot's choice.
 2. Collect the `hides` of all chosen variants. Hide those part nodes, and show every other part node.
 
 Object and part node names are unique within the file.

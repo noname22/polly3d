@@ -194,18 +194,11 @@ fn add_child(nodes: &mut [Value], parent: usize, child: usize) {
     children.as_array_mut().unwrap().push(json!(child));
 }
 
-/// Parts hidden by some variant's hide rule, per object: exported as their own
-/// nodes so they can be hidden independently.
-fn hideable_parts(scene: &Scene) -> BTreeMap<ObjectId, BTreeSet<String>> {
-    let mut out: BTreeMap<ObjectId, BTreeSet<String>> = BTreeMap::new();
-    for slot in scene.slots.values() {
-        for v in &slot.variants {
-            for h in &v.hides {
-                out.entry(h.object).or_default().insert(h.part.clone());
-            }
-        }
-    }
-    out
+type HideGroups = BTreeMap<ObjectId, BTreeMap<BTreeSet<String>, BTreeSet<polly_core::mesh::FaceId>>>;
+
+/// Node name of an object's faces hidden by exactly these hide rules.
+fn group_node_name(object: &str, parts: &BTreeSet<String>) -> String {
+    format!("{object}.{}", parts.iter().cloned().collect::<Vec<_>>().join("+"))
 }
 
 pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
@@ -287,7 +280,9 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
     // Nodes animated by an object's morph weights (its own node and its part nodes).
     let mut morph_nodes: BTreeMap<ObjectId, Vec<usize>> = BTreeMap::new();
     let mut extensions_used: BTreeSet<&str> = BTreeSet::new();
-    let hideable = hideable_parts(scene);
+    // Faces hidden by variants, grouped by which hide rules cover them: each
+    // group becomes its own node so it can be hidden independently.
+    let hide_groups: HideGroups = polly_core::variants::hide_groups(scene);
 
     // 1. A node per object (filled in below) and joint nodes per skeleton.
     for id in &selected {
@@ -403,12 +398,13 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
         let skin_index = arm.and_then(|a| skin_info[&a].skin);
         let skinned = arm.is_some();
         let morphed = !mesh.morphs.is_empty();
-        let parts = hideable.get(id).cloned().unwrap_or_default();
-        // Faces grouped by hideable part (None = everything else), then by material.
-        let mut groups: BTreeMap<Option<String>, BTreeMap<u32, Prim>> = BTreeMap::new();
+        let group_of: HashMap<polly_core::mesh::FaceId, &BTreeSet<String>> =
+            hide_groups.get(id).into_iter().flatten().flat_map(|(k, fs)| fs.iter().map(move |f| (*f, k))).collect();
+        // Faces grouped by hide group (None = never hidden), then by material.
+        let mut groups: BTreeMap<Option<BTreeSet<String>>, BTreeMap<u32, Prim>> = BTreeMap::new();
         for (&fid, f) in &mesh.faces {
             let pts: Vec<Vec3> = mesh.face_positions(f).iter().map(|p| to_skel.transform_point3(*p)).collect();
-            let group = f.part.clone().filter(|p| parts.contains(p));
+            let group = group_of.get(&fid).map(|k| (*k).clone());
             let prim = groups.entry(group).or_default().entry(f.material).or_default();
             let vidx: Vec<u32> = (0..f.len())
                 .map(|i| {
@@ -471,11 +467,11 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
             meshes.push(mj);
             let node = match &group {
                 None => node_of[id],
-                Some(part) => {
+                Some(parts) => {
                     let n = nodes.len();
                     nodes.push(json!({
-                        "name": format!("{}.{part}", o.name),
-                        "extras": {"polly": {"object": o.name, "part": part}},
+                        "name": group_node_name(&o.name, parts),
+                        "extras": {"polly": {"object": o.name, "parts": parts}},
                     }));
                     add_child(&mut nodes, node_of[id], n);
                     n
@@ -488,10 +484,10 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
             if morphed {
                 morph_nodes.entry(*id).or_default().push(node);
             }
-            if let Some(part) = &group {
-                // Hidden by default when a default variant hides it.
+            if let Some(parts) = &group {
+                // Hidden by default when a default variant hides any of it.
                 let hidden = scene.slots.values().any(|s| {
-                    s.variants.iter().any(|v| v.name == s.default && v.hides.iter().any(|h| h.object == *id && &h.part == part))
+                    s.variants.iter().any(|v| v.name == s.default && v.hides.iter().any(|h| h.object == *id && parts.contains(&h.part)))
                 });
                 if hidden {
                     nodes[node]["extensions"] = json!({"KHR_node_visibility": {"visible": false}});
@@ -503,15 +499,15 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
 
     // 4. Variants: tag variant nodes; hide the non-default ones.
     for (slot, s) in &scene.slots {
-        for v in &s.variants {
-            for oid in &v.objects {
-                let Some(&n) = node_of.get(oid) else { continue };
-                let default = v.name == s.default;
-                nodes[n]["extras"] = json!({"polly": {"slot": slot, "variant": v.name, "default": default}});
-                if !default {
-                    nodes[n]["extensions"] = json!({"KHR_node_visibility": {"visible": false}});
-                    extensions_used.insert("KHR_node_visibility");
-                }
+        let members: BTreeSet<ObjectId> = s.variants.iter().flat_map(|v| v.objects.iter().copied()).collect();
+        for oid in members {
+            let Some(&n) = node_of.get(&oid) else { continue };
+            let variants: Vec<&str> = s.variants.iter().filter(|v| v.objects.contains(&oid)).map(|v| v.name.as_str()).collect();
+            let default = variants.contains(&s.default.as_str());
+            nodes[n]["extras"] = json!({"polly": {"slot": slot, "variants": variants, "default": default}});
+            if !default {
+                nodes[n]["extensions"] = json!({"KHR_node_visibility": {"visible": false}});
+                extensions_used.insert("KHR_node_visibility");
             }
         }
     }
@@ -632,7 +628,7 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
     }
     let mut scene_j = json!({"nodes": roots});
     if !scene.slots.is_empty() {
-        scene_j["extras"] = json!({"polly": slots_extras(scene, &selected)});
+        scene_j["extras"] = json!({"polly": slots_extras(scene, &selected, &hide_groups)});
     }
     let mut doc = json!({
         "asset": {"version": "2.0", "generator": "polly3d"},
@@ -682,7 +678,7 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
 }
 
 /// Slot table for the scene's extras (schema version 1, see docs/gltf-extras.md).
-fn slots_extras(scene: &Scene, selected: &BTreeSet<ObjectId>) -> Value {
+fn slots_extras(scene: &Scene, selected: &BTreeSet<ObjectId>, groups: &HideGroups) -> Value {
     let name = |id: &ObjectId| scene.objects[id].name.clone();
     let slots: serde_json::Map<String, Value> = scene
         .slots
@@ -698,7 +694,17 @@ fn slots_extras(scene: &Scene, selected: &BTreeSet<ObjectId>) -> Value {
                 .iter()
                 .filter(|v| !v.hides.is_empty())
                 .map(|v| {
-                    let parts: Vec<Value> = v.hides.iter().map(|h| json!([name(&h.object), h.part, format!("{}.{}", name(&h.object), h.part)])).collect();
+                    // One entry per node the rule hides (its faces may be split by overlapping rules).
+                    let parts: Vec<Value> = v
+                        .hides
+                        .iter()
+                        .filter(|h| selected.contains(&h.object))
+                        .flat_map(|h| {
+                            groups.get(&h.object).into_iter().flatten().filter(|(k, _)| k.contains(&h.part)).map(|(k, _)| {
+                                json!([name(&h.object), h.part, group_node_name(&name(&h.object), k)])
+                            })
+                        })
+                        .collect();
                     (v.name.clone(), json!(parts))
                 })
                 .collect();

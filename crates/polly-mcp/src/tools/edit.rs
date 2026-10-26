@@ -29,6 +29,18 @@ pub fn tools() -> Vec<ToolDef> {
             false,
             solidify,
         ),
+        def(
+            "inflate",
+            "Push vertices out (or in, with a negative distance) along their smooth normals: fattening limbs, puffing cloth, organic swelling. `keep_plane` stops vertices crossing a plane and keeps those on it on it (e.g. a symmetric model's centre: point [0,0,0], normal [1,0,0]).",
+            false,
+            inflate,
+        ),
+        def(
+            "shell",
+            "Make a new object from faces of another, pushed out along the surface normals by `offset`: the way to make clothing from the body it covers (select the torso faces -> shirt). UVs, parts, materials, seams, skin weights and morphs are copied, and the shell is placed and rigged like its source (bound to the same armature), so it follows the same animation. `keep_plane` keeps a centre line on the mirror plane. Follow with solidify for thickness and auto_hide to hide the skin under it.",
+            false,
+            shell,
+        ),
         def("set_position", "Set absolute coordinates of elements' vertices; omitted axes are unchanged (e.g. flatten to y=0).", false, set_position),
         def("snap", "Snap vertex positions to a grid step.", false, snap),
         def(
@@ -666,6 +678,76 @@ struct Solidify {
     /// -1 = grow behind the faces (default), 0 = centred, 1 = grow outward.
     #[serde(default = "minus_one")]
     offset: f32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct PlaneArg {
+    point: [f32; 3],
+    normal: [f32; 3],
+}
+
+impl PlaneArg {
+    fn keep(p: &Option<PlaneArg>) -> Option<polly_core::ops::shell::KeepPlane> {
+        p.as_ref().map(|p| polly_core::ops::shell::KeepPlane { point: Vec3::from_array(p.point), normal: Vec3::from_array(p.normal) })
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Inflate {
+    object: Option<String>,
+    elements: Option<Vec<String>>,
+    /// Along the normals, in object units; negative shrinks.
+    distance: f32,
+    /// A plane vertices may not cross (object space).
+    keep_plane: Option<PlaneArg>,
+}
+
+fn inflate(ctx: &mut Ctx, a: Inflate) -> Result<Out> {
+    let keep = PlaneArg::keep(&a.keep_plane);
+    edit_mesh(ctx, &a.object, Some(&a.elements), "inflate", |m, s| {
+        let verts = s.touched_verts(m);
+        polly_core::ops::shell::inflate(m, &verts, a.distance, keep)?;
+        Ok(Default::default())
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Shell {
+    /// Source object (default: active).
+    object: Option<String>,
+    /// Source faces (default: its selection).
+    elements: Option<Vec<String>>,
+    /// Name of the new object.
+    name: String,
+    /// Distance out along the normals (default 0.02).
+    offset: Option<f32>,
+    /// A plane the shell may not cross (source object space), e.g. the centre of a symmetric body.
+    keep_plane: Option<PlaneArg>,
+}
+
+fn shell(ctx: &mut Ctx, a: Shell) -> Result<Out> {
+    let s = &ctx.doc.scene;
+    let src = resolve(s, &a.object)?;
+    let faces = elements(s, src, &a.elements)?.implied_faces(&s.object(src)?.mesh);
+    if faces.is_empty() {
+        anyhow::bail!("no faces: select the faces to copy, or pass elements");
+    }
+    let mesh = polly_core::ops::shell::shell(&s.object(src)?.mesh, &faces, a.offset.unwrap_or(0.02), PlaneArg::keep(&a.keep_plane))?;
+    let id = edit_scene(ctx, "shell", |s| {
+        let o = s.object(src)?.clone();
+        let id = s.add_object(&a.name, mesh);
+        let n = s.object_mut(id)?;
+        n.transform = o.transform;
+        n.parent = o.parent;
+        n.parent_bone = o.parent_bone;
+        // Rigged like the source: same armature, or the source itself when it has the skeleton.
+        n.skin = o.skin.or_else(|| o.skeleton.as_ref().map(|_| polly_core::scene::SkinBinding { armature: src }));
+        Ok(id)
+    })?;
+    let mut j = super::scene::object_summary(&ctx.doc.scene, id);
+    j["from_faces"] = json!(faces.len());
+    let out = Out::json(j);
+    super::view::maybe_preview(ctx, id, out)
 }
 
 fn minus_one() -> f32 {

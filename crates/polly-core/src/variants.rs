@@ -1,19 +1,34 @@
 //! Swappable gear: slots (e.g. "hair", "head") hold variants, each a set of
-//! objects. One variant per slot is active; a variant can hide named parts of
-//! other objects (a helmet hiding the top of the hair) to avoid poke-through.
+//! objects. One variant per slot is active; a variant can hide parts of other
+//! objects (a helmet hiding the top of the hair, a blazer the skin under it)
+//! to avoid poke-through. An object can be in several variants of one slot
+//! ("blouse" and "suit" = blouse + blazer), but not in two slots.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, invalid};
+use crate::mesh::{Face, FaceId};
 use crate::scene::{ObjectId, Scene};
 
-/// Hide the faces of `part` on `object` while the variant is active.
+/// Hide faces of `object` while the variant is active: the faces labelled
+/// `part`, or an explicit face set named `part` (e.g. found by auto_hide).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HideRule {
     pub object: ObjectId,
     pub part: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faces: Option<BTreeSet<FaceId>>,
+}
+
+impl HideRule {
+    pub fn hides(&self, id: FaceId, f: &Face) -> bool {
+        match &self.faces {
+            Some(set) => set.contains(&id),
+            None => f.part.as_deref() == Some(self.part.as_str()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,10 +61,11 @@ impl Slot {
 }
 
 impl Scene {
-    /// The slot and variant an object belongs to, if any.
-    pub fn variant_of(&self, id: ObjectId) -> Option<(&str, &str)> {
+    /// The slot an object belongs to and its variants there, if any.
+    pub fn variants_of(&self, id: ObjectId) -> Option<(&str, Vec<&str>)> {
         self.slots.iter().find_map(|(s, slot)| {
-            slot.variants.iter().find(|v| v.objects.contains(&id)).map(|v| (s.as_str(), v.name.as_str()))
+            let vs: Vec<&str> = slot.variants.iter().filter(|v| v.objects.contains(&id)).map(|v| v.name.as_str()).collect();
+            (!vs.is_empty()).then_some((s.as_str(), vs))
         })
     }
 
@@ -61,15 +77,29 @@ impl Scene {
         }
         for o in &v.objects {
             let ob = self.object(*o)?;
-            match self.variant_of(*o) {
-                Some((s, other)) if !(s == slot && other == v.name) => {
-                    return invalid(format!("'{}' already belongs to slot '{s}' (variant '{other}'); an object can be in one variant only", ob.name));
+            match self.variants_of(*o) {
+                Some((s, vs)) if s != slot => {
+                    return invalid(format!(
+                        "'{}' already belongs to slot '{s}' (variant {}); an object can be in several variants of one slot, not in two slots",
+                        ob.name,
+                        vs.join(", ")
+                    ));
                 }
                 _ => {}
             }
         }
+        let mut names = BTreeSet::new();
         for h in &v.hides {
             let ob = self.object(h.object)?;
+            if !names.insert((h.object, h.part.as_str())) {
+                return invalid(format!("two hide rules for '{}' are both named '{}'", ob.name, h.part));
+            }
+            if let Some(faces) = &h.faces {
+                if !faces.iter().any(|f| ob.mesh.faces.contains_key(f)) {
+                    return invalid(format!("hide rule '{}': none of its faces exist on '{}'", h.part, ob.name));
+                }
+                continue;
+            }
             if !ob.mesh.faces.values().any(|f| f.part.as_deref() == Some(h.part.as_str())) {
                 let parts: BTreeSet<&str> = ob.mesh.faces.values().filter_map(|f| f.part.as_deref()).collect();
                 return invalid(format!(
@@ -107,28 +137,48 @@ pub fn variant_view(scene: &Scene, choice: &BTreeMap<String, String>) -> Scene {
         return scene.clone();
     }
     let mut out = scene.clone();
-    let mut hide: BTreeMap<ObjectId, BTreeSet<&str>> = BTreeMap::new();
+    let mut hide: BTreeMap<ObjectId, Vec<&HideRule>> = BTreeMap::new();
     for (name, slot) in &scene.slots {
         let pick = choice.get(name).unwrap_or(&slot.active);
-        for v in &slot.variants {
-            if &v.name == pick {
-                for h in &v.hides {
-                    hide.entry(h.object).or_default().insert(&h.part);
-                }
-            } else {
-                for o in &v.objects {
-                    if let Some(ob) = out.objects.get_mut(o) {
-                        ob.visible = false;
-                    }
-                }
+        let chosen = slot.variants.iter().find(|v| &v.name == pick);
+        let shown: BTreeSet<ObjectId> = chosen.map(|v| v.objects.iter().copied().collect()).unwrap_or_default();
+        for h in chosen.into_iter().flat_map(|v| &v.hides) {
+            hide.entry(h.object).or_default().push(h);
+        }
+        for o in slot.variants.iter().flat_map(|v| &v.objects).filter(|o| !shown.contains(o)) {
+            if let Some(ob) = out.objects.get_mut(o) {
+                ob.visible = false;
             }
         }
     }
-    for (id, parts) in hide {
+    for (id, rules) in hide {
         if let Some(ob) = out.objects.get_mut(&id) {
             let m = std::sync::Arc::make_mut(&mut ob.mesh);
-            m.faces.retain(|_, f| f.part.as_deref().is_none_or(|p| !parts.contains(p)));
+            m.faces.retain(|fid, f| !rules.iter().any(|r| r.hides(*fid, f)));
         }
+    }
+    out
+}
+
+/// For each object with hide rules, its faces grouped by the set of rule
+/// names that hide them (faces no rule hides are left out). Overlapping
+/// rules (a blouse and a blazer both covering the chest) give separate groups.
+pub fn hide_groups(scene: &Scene) -> BTreeMap<ObjectId, BTreeMap<BTreeSet<String>, BTreeSet<FaceId>>> {
+    let mut rules: BTreeMap<ObjectId, BTreeMap<&str, &HideRule>> = BTreeMap::new();
+    for h in scene.slots.values().flat_map(|s| &s.variants).flat_map(|v| &v.hides) {
+        rules.entry(h.object).or_default().insert(&h.part, h);
+    }
+    let mut out = BTreeMap::new();
+    for (id, rs) in rules {
+        let Some(o) = scene.objects.get(&id) else { continue };
+        let mut groups: BTreeMap<BTreeSet<String>, BTreeSet<FaceId>> = BTreeMap::new();
+        for (fid, f) in &o.mesh.faces {
+            let key: BTreeSet<String> = rs.iter().filter(|(_, r)| r.hides(*fid, f)).map(|(n, _)| n.to_string()).collect();
+            if !key.is_empty() {
+                groups.entry(key).or_default().insert(*fid);
+            }
+        }
+        out.insert(id, groups);
     }
     out
 }
@@ -166,7 +216,7 @@ mod tests {
         s.set_variant_def("hair", Variant { name: "short".into(), objects: vec![a], hides: vec![] }).unwrap();
         s.set_variant_def("hair", Variant { name: "long".into(), objects: vec![b], hides: vec![] }).unwrap();
         s.set_variant_def("head", Variant { name: "none".into(), objects: vec![], hides: vec![] }).unwrap();
-        s.set_variant_def("head", Variant { name: "helmet".into(), objects: vec![helmet], hides: vec![HideRule { object: a, part: "hair_top".into() }] })
+        s.set_variant_def("head", Variant { name: "helmet".into(), objects: vec![helmet], hides: vec![HideRule { object: a, part: "hair_top".into(), faces: None }] })
             .unwrap();
         // defaults: first variants
         assert_eq!(s.slots["hair"].default, "short");
@@ -177,9 +227,9 @@ mod tests {
         let v = variant_view(&s, &BTreeMap::from([("head".to_string(), "helmet".to_string())]));
         assert!(v.objects[&helmet].visible);
         assert_eq!(v.objects[&a].mesh.faces.len(), 5);
-        // an object can be in one variant only; hide rules need a real part
+        // an object can't be in two slots; hide rules need a real part
         assert!(s.set_variant_def("head", Variant { name: "cap".into(), objects: vec![a], hides: vec![] }).is_err());
-        assert!(s.set_variant_def("head", Variant { name: "cap".into(), objects: vec![], hides: vec![HideRule { object: b, part: "x".into() }] }).is_err());
+        assert!(s.set_variant_def("head", Variant { name: "cap".into(), objects: vec![], hides: vec![HideRule { object: b, part: "x".into(), faces: None }] }).is_err());
         // deleting an object removes it from variants and hide rules
         s.remove_object(a).unwrap();
         assert!(s.slots["hair"].variants[0].objects.is_empty());
