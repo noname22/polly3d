@@ -43,11 +43,11 @@ renderer.
 
 | crate | purpose |
 |---|---|
-| `polly-core` | n-gon mesh with stable ids, primitives, modelling ops (extrude, inset, bevel, loop cut, subdivide, dissolve, bridge, mirror…), selection queries, scene, undo history |
+| `polly-core` | n-gon mesh with stable ids, primitives, modelling ops (extrude, inset, bevel, loop cut, subdivide, dissolve, bridge, mirror…), selection queries, scene, undo history, skeletons, skinning, morphs, clips |
 | `polly-uv` | seams, projections, LSCM unwrap, pixel-snapped packing, UV reports |
 | `polly-paint` | palettes, crisp pixel drawing, ordered dithering, procedural fills (bricks, planks, noise…), face fills, quantize |
 | `polly-render` | wgpu offscreen renderer, ID-labelled overlays, contact sheets, CPU picking, UV layout view |
-| `polly-export` | GLB export (textures embedded, sampler filter preserved), `.polly` project files |
+| `polly-export` | GLB export (textures, sampler filter, skins, morph targets, animations), `.polly` project files |
 | `polly-mcp` | MCP tool layer (rmcp) |
 | `polly` | binary: stdio server + optional egui viewer |
 
@@ -63,6 +63,20 @@ subagents", the agent calls `create_scene` once per model and each subagent
 passes its `scene` on every call. `list_scenes` and `render_overview` (a
 captioned grid of all scenes) show the results. `delete_scene` removes a
 scene, and `clear_scene` empties one.
+
+## Rigging and animation
+
+Objects can have a skeleton: bones given by head/tail points with parents. Each
+vertex has up to 4 skin weights, set by hand or computed automatically (rigid,
+the classic one-bone-per-part look, or smooth blending at joints). Morph targets
+(shape keys) are authored by moving vertices between `begin_morph` and
+`end_morph`. Clips hold keyframes for bones, object transforms and morph
+weights, with linear or step interpolation and a loop region. Any number of
+clips can be blended by weight. Renders can show bones, a weight heatmap for one
+bone, a pose at any frame, or a filmstrip of frames. GLB export includes skins,
+morph targets and animations; loop regions go in the animation's extras.
+Deformation happens on the CPU and produces a display copy of the scene, so
+element ids, picking and painting all work on the posed model.
 
 ## Conventions the agent sees
 

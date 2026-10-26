@@ -16,7 +16,7 @@ pub(crate) struct LineInst {
     pub a: [f32; 3],
     pub b: [f32; 3],
     pub color: [f32; 4],
-    /// width px, point flag, depth-bias multiplier, unused
+    /// width px, point flag, depth-bias multiplier, on-top flag
     pub params: [f32; 4],
 }
 
@@ -35,6 +35,8 @@ pub(crate) const SEAM: [f32; 4] = [0.95, 0.12, 0.12, 1.0];
 pub(crate) const SHARP: [f32; 4] = [0.1, 0.85, 0.95, 1.0];
 pub(crate) const NORMAL: [f32; 4] = [0.7, 1.0, 0.15, 1.0];
 pub(crate) const BOUNDS: [f32; 4] = [1.0, 0.85, 0.2, 0.8];
+pub(crate) const BONE: [f32; 4] = [0.98, 0.78, 0.25, 1.0];
+pub(crate) const BONE_LINK: [f32; 4] = [0.98, 0.78, 0.25, 0.45];
 
 pub(crate) struct LineBuilder {
     pub out: Vec<LineInst>,
@@ -48,6 +50,13 @@ impl LineBuilder {
     }
     pub fn point(&mut self, p: Vec3, color: [f32; 4], size: f32, bias: f32) {
         self.out.push(LineInst { a: p.to_array(), b: p.to_array(), color: lin(color), params: [size * self.s, 1.0, bias, 0.0] });
+    }
+    /// A line drawn on top of all geometry.
+    pub fn line_on_top(&mut self, a: Vec3, b: Vec3, color: [f32; 4], width: f32) {
+        self.out.push(LineInst { a: a.to_array(), b: b.to_array(), color: lin(color), params: [width * self.s, 0.0, 0.0, 1.0] });
+    }
+    pub fn point_on_top(&mut self, p: Vec3, color: [f32; 4], size: f32) {
+        self.out.push(LineInst { a: p.to_array(), b: p.to_array(), color: lin(color), params: [size * self.s, 1.0, 0.0, 1.0] });
     }
 }
 
@@ -85,6 +94,24 @@ pub(crate) fn build(scene: &Scene, prep: &Prepared, ov: &Overlays, s: f32, frame
     for po in &prep.objects {
         let mesh = &po.mesh;
         let obj = &scene.objects[&po.id];
+        if ov.bones {
+            if let Some(sk) = &obj.skeleton {
+                let m = scene.world_matrix(po.id);
+                for b in sk.bones.values() {
+                    let (h, t) = (m.transform_point3(b.head), m.transform_point3(b.tail));
+                    lb.line_on_top(h, t, [0.05, 0.04, 0.02, 1.0], 6.0);
+                    lb.line_on_top(h, t, BONE, 3.5);
+                    lb.point_on_top(h, [0.05, 0.04, 0.02, 1.0], 9.0);
+                    lb.point_on_top(h, BONE, 6.0);
+                    // Dashed-looking thin link from a disconnected parent's tail.
+                    if let Some(p) = b.parent.and_then(|p| sk.bones.get(&p)) {
+                        if (p.tail - b.head).length() > 1e-4 {
+                            lb.line_on_top(m.transform_point3(p.tail), h, BONE_LINK, 1.5);
+                        }
+                    }
+                }
+            }
+        }
         let valid = |e: &Edge| po.pos.contains_key(&e.0) && po.pos.contains_key(&e.1);
         let edges: BTreeSet<Edge> = mesh.edges().into_iter().filter(valid).collect();
         let p = |v| po.pos[&v];

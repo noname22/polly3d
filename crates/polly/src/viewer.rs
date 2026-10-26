@@ -454,7 +454,7 @@ fn refresh_thumb(ctx: &egui::Context, gpu: &mut Gpu, s: &Snapshot, size: u32) ->
     if matches!(gpu.thumbs.get(&s.name), Some((v, sz, _)) if *v == s.version && *sz == size) {
         return Ok(());
     }
-    let img = gpu.scene.render(&s.scene, &tile_options(size))?.image;
+    let img = gpu.scene.render(&polly_core::anim::pose_scene(&s.scene, &[]), &tile_options(size))?.image;
     let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
     let tex = ctx.load_texture(format!("thumb:{}", s.name), color, egui::TextureOptions::LINEAR);
     gpu.thumbs.insert(s.name.clone(), (s.version, size, tex));
@@ -499,7 +499,8 @@ fn single(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, workspace: &Wo
         legend: false,
         ..RenderOptions::default()
     };
-    gpu.scene.render_to_view(&snap.scene, &opts, &target, VIEWPORT_FORMAT, size)?;
+    let shown = polly_core::anim::pose_scene(&snap.scene, &[]);
+    gpu.scene.render_to_view(&shown, &opts, &target, VIEWPORT_FORMAT, size)?;
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     ui.painter().image(id, rect, uv, egui::Color32::WHITE);
     ui.painter().text(

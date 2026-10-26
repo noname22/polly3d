@@ -1,3 +1,4 @@
+pub mod anim;
 pub mod common;
 pub mod edit;
 pub mod history;
@@ -19,6 +20,7 @@ pub fn registry() -> Registry {
     tools.extend(edit::tools());
     tools.extend(history::tools());
     tools.extend(view::tools());
+    tools.extend(anim::tools());
     tools.extend(uv::tools());
     tools.extend(paint::tools());
     tools.extend(io::tools());

@@ -132,6 +132,21 @@ pub(crate) fn annotate(img: &mut RgbaImage, scene: &Scene, o: &RenderOptions, fr
         }
     }
 
+    if ov.bone_names {
+        for po in &prep.objects {
+            let Some(sk) = &scene.objects.get(&po.id).and_then(|o| o.skeleton.as_ref()) else { continue };
+            let m = scene.world_matrix(po.id);
+            for b in sk.bones.values() {
+                let mid = m.transform_point3((b.head + b.tail) * 0.5);
+                if let Some((at, depth)) = cam.project_depth(mid) {
+                    if on_screen(at) {
+                        cands.push(Cand { text: b.name.clone(), at, depth, kind: Kind::Name, selected: false });
+                    }
+                }
+            }
+        }
+    }
+
     // Names first, then selected elements, then nearest first; faces before edges before verts.
     let rank = |k: Kind| match k {
         Kind::Name => 0,

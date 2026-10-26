@@ -259,3 +259,80 @@ fn parallel_scenes() {
         std::fs::write(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("overview.png"), &images(&r)[0]).unwrap();
     }
 }
+
+/// Rig an arm, skin it, pose it, animate it, add a morph, look, export.
+#[test]
+fn rig_pose_animate_export() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "cylinder", "radius_bottom": 0.2, "radius_top": 0.2, "height": 2, "segments": 6, "height_segments": 4}, "name": "Arm"}));
+    call(&s, "add_bone_chain", json!({"points": [[0, -1, 0], [0, 0, 0], [0, 1, 0]], "names": ["upper", "lower"]}));
+    let e = call_err(&s, "add_bone", json!({"name": "upper", "head": [0, 0, 0], "tail": [1, 0, 0]}));
+    assert!(e.contains("already exists"), "{e}");
+    call(&s, "auto_weights", json!({"method": {"mode": "smooth", "falloff": 0.5}}));
+    let rep = call(&s, "weight_report", json!({}));
+    assert_eq!(rep["unweighted"]["count"], 0, "{rep}");
+    assert_eq!(rep["unnormalized"]["count"], 0, "{rep}");
+    let bones = call(&s, "list_bones", json!({}));
+    assert_eq!(bones["bones"][1]["parent"], "upper");
+
+    // pose + clip
+    call(&s, "create_clip", json!({"name": "wave", "frames": 24}));
+    call(&s, "key_pose", json!({"clip": "wave", "frame": 0, "bones": ["lower"]}));
+    call(&s, "pose_bone", json!({"bone": "lower", "rotation": [0, 0, 90]}));
+    call(&s, "key_pose", json!({"clip": "wave", "frame": 12}));
+    call(&s, "update_clip", json!({"clip": "wave", "loop_start_frame": 6, "loop_end_frame": 18}));
+    let d = call(&s, "describe_clip", json!({"clip": "wave"}));
+    assert_eq!(d["loop_frames"], json!([6.0, 18.0]));
+    assert_eq!(d["channels"][0]["frames"], json!([0.0, 12.0]));
+    call(&s, "clear_pose", json!({}));
+
+    // morph via begin/end
+    call(&s, "begin_morph", json!({"name": "bulge"}));
+    call(&s, "scale", json!({"elements": ["all"], "factor": [1.5, 1, 1.5]}));
+    let m = call(&s, "end_morph", json!({}));
+    assert!(m["moved_verts"].as_u64().unwrap() > 10, "{m}");
+    let e = call_err(&s, "end_morph", json!({}));
+    assert!(e.contains("no morph edit"), "{e}");
+    call(&s, "set_key", json!({"clip": "wave", "frame": 12, "morph": "bulge", "value": [1.0]}));
+
+    // render posed, weights heatmap, filmstrip (when a GPU is available)
+    let r = s.call("render", json!({"pose": [{"clip": "wave", "frame": 12}], "overlays": {"bones": true, "bone_names": true}}));
+    if r.is_error != Some(true) {
+        let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+        std::fs::write(out.join("arm_posed.png"), &images(&r)[0]).unwrap();
+        let w = s.call("render", json!({"show_weights": "lower", "view": "front"}));
+        assert_ne!(w.is_error, Some(true), "{}", text(&w));
+        std::fs::write(out.join("arm_weights.png"), &images(&w)[0]).unwrap();
+        let f = s.call("render_animation", json!({"clips": [{"clip": "wave"}], "count": 4, "view": "front", "overlays": {"bones": true}}));
+        assert_ne!(f.is_error, Some(true), "{}", text(&f));
+        std::fs::write(out.join("arm_filmstrip.png"), &images(&f)[0]).unwrap();
+        // Picking follows the pose of the last render: only the bent forearm
+        // reaches x < -0.3 (at rest the arm stays within 0.2 of the axis).
+        call(&s, "render", json!({"view": "front", "pose": [{"clip": "wave", "frame": 12}]}));
+        let mut min_x = f64::MAX;
+        for py in (16..512).step_by(32) {
+            for px in (16..512).step_by(32) {
+                let hit = call(&s, "pick", json!({"x": px, "y": py}));
+                if hit["object"] == "Arm" {
+                    min_x = min_x.min(hit["position"][0].as_f64().unwrap());
+                }
+            }
+        }
+        assert!(min_x < -0.3, "no hit on the bent forearm (min x {min_x})");
+    }
+
+    // export
+    let dir = std::env::temp_dir().join(format!("polly-rig-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let glb = dir.join("arm.glb");
+    call(&s, "export_glb", json!({"path": glb.to_str().unwrap()}));
+    let (doc, _, _) = gltf::import(&glb).unwrap();
+    assert_eq!(doc.skins().count(), 1);
+    assert_eq!(doc.animations().count(), 1);
+    std::fs::remove_dir_all(dir).ok();
+
+    // deleting a bone removes its channels and weights
+    call(&s, "delete_bone", json!({"bone": "lower"}));
+    let d = call(&s, "describe_clip", json!({"clip": "wave"}));
+    assert_eq!(d["channels"].as_array().unwrap().len(), 1, "{d}"); // morph channel remains
+}

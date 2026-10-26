@@ -99,7 +99,7 @@ struct LineIn {
     @location(0) a: vec3<f32>,
     @location(1) b: vec3<f32>,
     @location(2) color: vec4<f32>,
-    // x = width px, y = 1 for a point (square), z = depth bias multiplier
+    // x = width px, y = 1 for a point (square), z = depth bias multiplier, w = 1 to draw on top
     @location(3) params: vec4<f32>,
 };
 
@@ -156,6 +156,11 @@ fn vs_line(@builtin(vertex_index) vi: u32, l: LineIn) -> LineOut {
         let base = mix(na, nb, c.x);
         ndc = base.xy + (nrm * c.y * hw + dir * (c.x * 2.0 - 1.0) * hw) / half_px;
         z = base.z;
+    }
+    // params.w > 0.5: draw on top of geometry (bones inside a mesh), keeping
+    // the relative depth order between such lines.
+    if (l.params.w > 0.5) {
+        z = z * 0.001;
     }
     o.pos = vec4<f32>(ndc, clamp(z, 0.0, 1.0), 1.0);
     return o;

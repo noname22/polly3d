@@ -85,7 +85,8 @@ pub fn render_grid(
         let (x, y) = (ox + GAP + c * (tile + GAP), oy + GAP + r * (tile + GAP));
         let fresh = matches!(cache.get(&s.name), Some((v, t, _)) if *v == s.version && *t == tile);
         if !fresh {
-            let rendered = renderer.render(&s.scene, &tile_options(tile))?.image;
+            let shown = polly_core::anim::pose_scene(&s.scene, &[]);
+            let rendered = renderer.render(&shown, &tile_options(tile))?.image;
             cache.insert(s.name.clone(), (s.version, tile, rendered));
         }
         let tile_img = &cache[&s.name].2;

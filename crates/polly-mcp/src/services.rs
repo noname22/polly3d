@@ -18,6 +18,8 @@ pub struct Settings {
 pub struct LastView {
     pub camera: polly_render::CameraInfo,
     pub tiles: Vec<Tile>,
+    /// Clips the render was posed with, so picks hit the same geometry.
+    pub plays: Vec<polly_core::anim::ClipPlay>,
 }
 
 /// Requests to the live viewer window. Each carries a channel for the outcome.

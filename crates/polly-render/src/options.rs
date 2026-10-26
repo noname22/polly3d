@@ -104,6 +104,10 @@ pub struct Overlays {
     pub bounds: bool,
     /// Object name labels.
     pub object_names: bool,
+    /// Skeleton bones (drawn on top of the mesh, head as a dot).
+    pub bones: bool,
+    /// Bone name labels (implies nothing else; combine with `bones`).
+    pub bone_names: bool,
     /// Also label elements that face away from / are hidden from the camera.
     pub backface_labels: bool,
 }
@@ -123,6 +127,8 @@ impl Default for Overlays {
             grid: true,
             bounds: false,
             object_names: false,
+            bones: false,
+            bone_names: false,
             backface_labels: false,
         }
     }
@@ -134,7 +140,7 @@ impl Overlays {
         Overlays { wireframe: false, selection: false, grid: false, ..Default::default() }
     }
     pub fn any_labels(&self) -> bool {
-        self.face_ids || self.vert_ids || self.edge_ids || self.object_names
+        self.face_ids || self.vert_ids || self.edge_ids || self.object_names || self.bone_names
     }
 }
 

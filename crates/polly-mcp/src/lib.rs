@@ -38,6 +38,14 @@ Workflow that works well
 5. Paint: create_texture (optionally palette-locked), assign it through a material, fill_faces / draw / paint_stroke, check render.
 6. save_project, export_glb.
 
+Rigging & animation (optional)
+- Rig: add_bone / add_bone_chain (head/tail points in object space), check with render overlays {"bones":true,"bone_names":true}.
+- Skin: auto_weights (rigid = each vertex follows one bone, the classic low-poly look; smooth = blended joints) or assign_weights; check with render {"show_weights":"<bone>"} and weight_report.
+- Pose: pose_bone (Euler degrees around the bone's own axes), then key_pose into a clip (create_clip; frames at the clip's fps). Repeat at other frames. Loop regions via update_clip.
+- Morphs: begin_morph, move vertices with the normal tools, end_morph; set_morph_weight or key them (key_pose with morphs, or set_key).
+- Check motion with render_animation (a filmstrip) or render {"pose":[{"clip":"walk","frame":6}]}; several clips with weights blend.
+- export_glb writes skins, morph targets and animations.
+
 The user may ask to watch live: show_viewer opens a window on their screen, hide_viewer closes it. Don't open it unasked.
 Scenes: everything above happens in a scene ("main" unless a tool call passes `scene`). Each scene has its own objects, selection, undo history and render camera.
 To build unrelated models in parallel (e.g. one per subagent), call create_scene once per model and tell each subagent to pass `scene: "<its name>"` on EVERY call. render_overview shows all scenes in one image; list_scenes lists them. Subagents sharing one scene should each work on their own object and pass explicit `object` and element ids.

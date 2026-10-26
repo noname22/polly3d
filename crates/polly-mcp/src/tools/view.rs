@@ -81,6 +81,27 @@ struct RenderArgs {
     label_scale: Option<u32>,
     /// Corner legend with view name and axes (default true).
     legend: Option<bool>,
+    /// Pose with animation clips at frames, blended by weight, e.g. [{"clip":"walk","frame":6}].
+    /// Without it, the static pose (pose_bone, set_morph_weight) is shown.
+    pose: Option<Vec<super::anim::PlayArg>>,
+    /// Show skin weights of this bone as a heatmap (blue 0 -> red 1, black = unweighted)
+    /// on the focus object (or the active object).
+    show_weights: Option<String>,
+}
+
+/// The scene as it should be shown for these args: posed and, optionally, as a weight heatmap.
+fn display_scene(ctx: &Ctx, a: &RenderArgs) -> Result<(Scene, Vec<polly_core::anim::ClipPlay>)> {
+    let s = &ctx.doc.scene;
+    let plays = super::anim::plays(s, a.pose.as_deref().unwrap_or(&[]))?;
+    let mut shown = polly_core::anim::pose_scene(s, &plays);
+    if let Some(bone) = &a.show_weights {
+        let obj = match a.focus.as_ref().and_then(|f| f.first()) {
+            Some(n) => s.resolve(Some(n))?,
+            None => s.resolve(None)?,
+        };
+        shown = super::anim::weight_view(&shown, obj, bone)?;
+    }
+    Ok((shown, plays))
 }
 
 fn options(scene: &Scene, a: &RenderArgs, default_size: u32) -> Result<RenderOptions> {
@@ -110,8 +131,8 @@ pub fn png(img: &image::RgbaImage) -> Result<Vec<u8>> {
     Ok(out.into_inner())
 }
 
-fn report(ctx: &mut Ctx, r: &Rendered) -> Result<Out> {
-    *ctx.last_view = Some(LastView { camera: r.camera.clone(), tiles: r.tiles.clone() });
+fn report(ctx: &mut Ctx, r: &Rendered, plays: Vec<polly_core::anim::ClipPlay>) -> Result<Out> {
+    *ctx.last_view = Some(LastView { camera: r.camera.clone(), tiles: r.tiles.clone(), plays });
     let c = &r.camera;
     let mut j = json!({
         "view": c.view,
@@ -130,14 +151,16 @@ fn report(ctx: &mut Ctx, r: &Rendered) -> Result<Out> {
 
 fn render(ctx: &mut Ctx, a: RenderArgs) -> Result<Out> {
     let o = options(&ctx.doc.scene, &a, 512)?;
-    let r = ctx.services.renderer()?.render(&ctx.doc.scene, &o)?;
-    report(ctx, &r)
+    let (shown, plays) = display_scene(ctx, &a)?;
+    let r = ctx.services.renderer()?.render(&shown, &o)?;
+    report(ctx, &r, plays)
 }
 
 fn contact_sheet(ctx: &mut Ctx, a: RenderArgs) -> Result<Out> {
     let o = options(&ctx.doc.scene, &a, 1024)?;
-    let r = ctx.services.renderer()?.contact_sheet(&ctx.doc.scene, &o)?;
-    report(ctx, &r)
+    let (shown, plays) = display_scene(ctx, &a)?;
+    let r = ctx.services.renderer()?.contact_sheet(&shown, &o)?;
+    report(ctx, &r, plays)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -172,6 +195,12 @@ fn uv_layout(ctx: &mut Ctx, a: UvLayout) -> Result<Out> {
 }
 
 /// Camera for a pixel of the last render (resolving contact-sheet tiles).
+/// The geometry the last render showed (posed the same way).
+fn last_scene(ctx: &Ctx) -> Scene {
+    let plays = ctx.last_view.as_ref().map(|l| l.plays.clone()).unwrap_or_default();
+    polly_core::anim::pose_scene(&ctx.doc.scene, &plays)
+}
+
 fn camera_at(ctx: &Ctx, x: f32, y: f32) -> Result<(CameraInfo, f32, f32)> {
     let lv = ctx.last_view.clone().context("nothing rendered in this scene yet; call render first")?;
     if lv.tiles.is_empty() {
@@ -194,7 +223,7 @@ struct Pick {
 
 fn pick(ctx: &mut Ctx, a: Pick) -> Result<Out> {
     let (cam, x, y) = camera_at(ctx, a.x, a.y)?;
-    let s = &ctx.doc.scene;
+    let s = &last_scene(ctx);
     match polly_render::pick(s, &cam, x, y) {
         None => Ok(Out::json(json!({"hit": null, "view": cam.view}))),
         Some(h) => {
@@ -238,7 +267,7 @@ fn paint_stroke(ctx: &mut Ctx, a: Stroke) -> Result<Out> {
     let mut last: Option<(ObjectId, u32)> = None;
     let mut missed = 0;
     {
-        let s = &ctx.doc.scene;
+        let s = &last_scene(ctx);
         for p in &samples {
             let (cam, x, y) = camera_at(ctx, p[0], p[1])?;
             let Some(h) = polly_render::pick(s, &cam, x, y) else {
@@ -297,9 +326,10 @@ fn set_auto_preview(ctx: &mut Ctx, a: AutoPreview) -> Result<Out> {
 pub fn maybe_preview(ctx: &mut Ctx, object: ObjectId, out: Out) -> Result<Out> {
     let Some(size) = ctx.services.settings.lock().unwrap().auto_preview else { return Ok(out) };
     let o = RenderOptions { focus: Some(vec![object]), ..RenderOptions::default().with_size(size, size) };
-    match ctx.services.renderer().and_then(|mut r| r.render(&ctx.doc.scene, &o)) {
+    let shown = polly_core::anim::pose_scene(&ctx.doc.scene, &[]);
+    match ctx.services.renderer().and_then(|mut r| r.render(&shown, &o)) {
         Ok(r) => {
-            *ctx.last_view = Some(LastView { camera: r.camera.clone(), tiles: vec![] });
+            *ctx.last_view = Some(LastView { camera: r.camera.clone(), tiles: vec![], plays: vec![] });
             Ok(out.with_image(png(&r.image)?))
         }
         Err(e) => {
