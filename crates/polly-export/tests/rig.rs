@@ -193,3 +193,69 @@ fn dropped_bone_channels_are_skipped() {
     let (doc, ..) = gltf::import_slice(&bytes).unwrap();
     assert_eq!(doc.animations().next().unwrap().channels().count(), 2);
 }
+
+/// Smooth / ease channels export as CUBICSPLINE that evaluates (the glTF way)
+/// to what Polly plays, including bone rotations converted to joint space.
+#[test]
+fn cubic_channels_match_polly_playback() {
+    let (mut s, id) = rigged();
+    let lower = s.objects[&id].skeleton.as_ref().unwrap().find("lower").unwrap();
+    let mut c = Clip::new("swing", 2.0, 24.0);
+    c.interpolation = Interpolation::Smooth;
+    let ch = c.channel_mut(Target::BoneRotation { object: id, bone: lower });
+    for (t, deg) in [(0.0, 0.0), (0.5, 50.0), (1.0, -20.0), (2.0, 0.0)] {
+        ch.set_key(t, Vec4::from(Quat::from_rotation_z(f32::to_radians(deg)) * Quat::from_rotation_x(f32::to_radians(deg * 0.3))));
+    }
+    let ch = c.channel_mut(Target::ObjectTranslation { object: id });
+    ch.interpolation = Interpolation::Ease;
+    for (t, x) in [(0.0, 1.0), (1.0, 2.0), (2.0, 1.5)] {
+        ch.set_key(t, Vec4::new(x, 2.0, 0.0, 0.0));
+    }
+    let cid = s.add_clip(c);
+    let bytes = export_glb(&s, &ExportOptions { objects: None }).unwrap();
+    let (doc, buffers, _) = gltf::import_slice(&bytes).unwrap();
+    let clip = &s.clips[&cid];
+    let anim = doc.animations().find(|a| a.name() == Some("swing")).unwrap();
+    let lower_node = doc.nodes().find(|n| n.name() == Some("lower")).unwrap();
+    let rest_local = Quat::from_array(lower_node.transform().decomposed().1);
+    let mut checked = 0;
+    for chan in anim.channels() {
+        assert_eq!(chan.sampler().interpolation(), gltf::animation::Interpolation::CubicSpline);
+        let r = chan.reader(|b| Some(&buffers[b.index()][..]));
+        let times: Vec<f32> = r.read_inputs().unwrap().collect();
+        let out: Vec<Vec4> = match r.read_outputs().unwrap() {
+            gltf::animation::util::ReadOutputs::Rotations(q) => q.into_f32().map(Vec4::from_array).collect(),
+            gltf::animation::util::ReadOutputs::Translations(t) => t.map(|v| Vec3::from_array(v).extend(0.0)).collect(),
+            _ => panic!(),
+        };
+        // glTF cubic spline: per key [in-tangent, value, out-tangent].
+        let eval = |t: f32| {
+            let k = times.partition_point(|x| *x <= t).clamp(1, times.len() - 1) - 1;
+            let dt = times[k + 1] - times[k];
+            let u = (t - times[k]) / dt;
+            let (u2, u3) = (u * u, u * u * u);
+            out[3 * k + 1] * (2.0 * u3 - 3.0 * u2 + 1.0)
+                + out[3 * k + 2] * dt * (u3 - 2.0 * u2 + u)
+                + out[3 * (k + 1) + 1] * (-2.0 * u3 + 3.0 * u2)
+                + out[3 * (k + 1)] * dt * (u3 - u2)
+        };
+        let polly_ch = |pred: fn(&Target) -> bool| clip.channels.iter().find(|c| pred(&c.target)).unwrap();
+        for t in [0.1, 0.3, 0.7, 1.4, 1.9] {
+            match chan.target().property() {
+                Property::Rotation => {
+                    let ch = polly_ch(|t| matches!(t, Target::BoneRotation { .. }));
+                    let want = rest_local * Quat::from_vec4(clip.sample(ch, t).unwrap());
+                    let got = Quat::from_vec4(eval(t)).normalize();
+                    assert!(got.angle_between(want) < 1e-3, "t={t}: {got} vs {want}");
+                }
+                Property::Translation => {
+                    let ch = polly_ch(|t| matches!(t, Target::ObjectTranslation { .. }));
+                    assert!(eval(t).abs_diff_eq(clip.sample(ch, t).unwrap(), 1e-4), "t={t}");
+                }
+                p => panic!("{p:?}"),
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 10);
+}

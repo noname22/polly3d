@@ -43,13 +43,24 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         def("edit_bone", "Rename, move (head/tail), re-parent or roll a bone (rest pose).", false, edit_bone),
         def("delete_bone", "Delete a bone; its children are re-parented and its weights removed.", false, delete_bone),
-        def("list_bones", "List an object's bones with rest head/tail, parent, current pose and how many vertices each one influences.", true, list_bones),
+        def(
+            "list_bones",
+            "List an object's bones with rest head/tail, parent, current pose, how many vertices each one influences, and its pose axes in world terms: which world direction its x/y/z point, and which way the tail moves for a positive x or z turn (y is along the bone: twist). Use it to pick the axis and sign for pose_bone/set_key; render overlay bone_axes draws them.",
+            true,
+            list_bones,
+        ),
         // skin
         def("assign_weights", "Set skin weights of vertices (elements) for one bone. mode: replace (default), add, subtract.", false, assign_weights),
         def("auto_weights", "Compute skin weights from distance to bones: rigid (each vertex follows its nearest bone; chunky retro look) or smooth (blend near joints).", false, auto_weights),
         def("normalize_weights", "Keep the 4 strongest bones per vertex and make each vertex's weights sum to 1.", false, normalize_weights),
         def("weight_report", "Skin weight summary: vertices per bone, unweighted vertices, vertices with more than 4 influences or unnormalized sums.", true, weight_report),
         // pose
+        def(
+            "mirror_pose",
+            "Mirror the static pose across the rig's X = 0 plane, swapping left/right bones by name (hand.L <-> hand.R; centre bones mirror onto themselves). mode: flip (default; the whole pose becomes its mirror image), left_to_right or right_to_left (copy one side's pose onto the other). Signs are handled for you.",
+            false,
+            mirror_pose,
+        ),
         def("pose_bone", "Pose a bone relative to its rest pose (rotation in Euler degrees about the bone's rest axes, +Y along the bone; translation; scale). This is the static pose shown in renders; key it into a clip with key_pose.", false, pose_bone),
         def("clear_pose", "Reset bones (default all) of an object to the rest pose.", false, clear_pose),
         // morphs
@@ -60,8 +71,8 @@ pub fn tools() -> Vec<ToolDef> {
         def("set_morph_weight", "Set a morph's static weight (0 = base shape, 1 = full morph; other values extrapolate).", false, set_morph_weight),
         def("delete_morph", "Delete a morph target.", false, delete_morph),
         // clips
-        def("create_clip", "Create an animation clip. Clip tools use frames at the clip's fps (default 24).", false, create_clip),
-        def("update_clip", "Change a clip's name, length, fps, looping or loop region (in frames).", false, update_clip),
+        def("create_clip", "Create an animation clip. Clip tools use frames at the clip's fps (default 24). Its channels interpolate smoothly by default (see set_interpolation).", false, create_clip),
+        def("update_clip", "Change a clip's name, length, fps, looping, loop region (in frames) or the interpolation of channels created from now on.", false, update_clip),
         def("delete_clip", "Delete an animation clip.", false, delete_clip),
         def("list_clips", "List clips with length, fps, loop region and channel counts.", true, list_clips),
         def("describe_clip", "Show a clip's channels (what is animated) and their key frames.", true, describe_clip),
@@ -72,8 +83,19 @@ pub fn tools() -> Vec<ToolDef> {
             key_pose,
         ),
         def("set_key", "Set one key directly: a bone property (rotation as Euler degrees, translation, scale), a morph weight, or an object transform property.", false, set_key),
+        def(
+            "copy_keys",
+            "Copy a clip's bone keys in a frame range to start at another frame, optionally mirrored (left/right swapped with correct signs). A walk cycle: key frames 0..12 for one step, then copy_keys frames [0, 12] to 12 with mirror: true for the other step (frame 24 = frame 0 makes it loop seamlessly). Without mirror it is a phase-shifted copy.",
+            false,
+            copy_keys,
+        ),
         def("delete_keys", "Delete keys of a clip, optionally only for one object/bone/morph and/or a frame range.", false, delete_keys),
-        def("set_interpolation", "Set interpolation (linear or step) of matching channels in a clip.", false, set_interpolation),
+        def(
+            "set_interpolation",
+            "Set interpolation of matching channels in a clip: smooth (curve through the keys; natural motion), ease (eases in and out of every key; deliberate moves), linear, or step (hold). In a looping clip a channel whose last key repeats its first at the loop region's ends wraps seamlessly.",
+            false,
+            set_interpolation,
+        ),
         def(
             "render_animation",
             "Render a filmstrip: several frames of one or more blended clips in one captioned grid image, to check motion.",
@@ -373,6 +395,16 @@ struct ObjectArg {
     object: Option<String>,
 }
 
+/// A world direction as the nearest axis ("+Z"), or rounded components when it is between axes.
+fn axis_name(d: Vec3) -> Value {
+    let names = [(Vec3::X, "+X"), (Vec3::NEG_X, "-X"), (Vec3::Y, "+Y"), (Vec3::NEG_Y, "-Y"), (Vec3::Z, "+Z"), (Vec3::NEG_Z, "-Z")];
+    let d = d.normalize_or_zero();
+    match names.iter().find(|(a, _)| a.dot(d) > 0.966) {
+        Some((_, n)) => json!(n),
+        None => json!(round3(d).map(|x| (x * 100.0).round() / 100.0)),
+    }
+}
+
 fn list_bones(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
     let s = &ctx.doc.scene;
     let obj = rig(s, resolve(s, &a.object)?);
@@ -390,12 +422,27 @@ fn list_bones(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
         }
     }
     let bound: Vec<&str> = s.objects.values().filter(|ob| ob.skin.is_some_and(|b| b.armature == obj)).map(|ob| ob.name.as_str()).collect();
+    // The axes pose rotations turn about, in world terms (with parents' static pose).
+    let frames = sk.pose_frames(&o.pose);
+    let world = s.world_matrix(obj);
     let bones: Vec<Value> = sk
         .ordered()
         .into_iter()
         .map(|id| {
             let b = &sk.bones[&id];
             let mut j = bone_json(sk, id, b);
+            let f = world * frames[&id];
+            let along = f.transform_vector3(Vec3::Y).normalize_or_zero();
+            let axis = |a: Vec3| f.transform_vector3(a).normalize_or_zero();
+            // Direction the tail moves for a small positive turn about each axis.
+            let moves = |a: Vec3| axis_name(axis(a).cross(along));
+            j["axes"] = json!({
+                "x": axis_name(axis(Vec3::X)),
+                "y": axis_name(along),
+                "z": axis_name(axis(Vec3::Z)),
+                "positive_x_turn_moves_tail": moves(Vec3::X),
+                "positive_z_turn_moves_tail": moves(Vec3::Z),
+            });
             j["weighted_verts"] = json!(counts.get(&id).copied().unwrap_or(0));
             if let Some(p) = o.pose.get(&id).filter(|p| !p.is_rest()) {
                 let (x, y, z) = p.rotation.to_euler(polly_core::glam::EulerRot::XYZ);
@@ -551,6 +598,148 @@ fn pose_bone(ctx: &mut Ctx, a: PoseBone) -> Result<Out> {
     })?;
     let out = Out::json(json!({"posed": a.bone, "hint": "render (bones overlay) to check; key_pose to record into a clip"}));
     super::view::maybe_preview(ctx, obj, out)
+}
+
+/// Which side a bone name marks: Some(true) = left, Some(false) = right, None = centre.
+fn side(name: &str) -> Option<bool> {
+    if super::scene::mirror_name(name) == format!("{name}.mirror") {
+        return None;
+    }
+    let l = name.to_lowercase();
+    let marked = |c: char| ['.', '_', '-', ' '].iter().any(|sep| l.ends_with(&format!("{sep}{c}")) || l.starts_with(&format!("{c}{sep}")));
+    Some(l.contains("left") || (!l.contains("right") && marked('l')))
+}
+
+/// Each bone's mirror partner (itself for centre bones and unmatched names).
+fn partners(sk: &polly_core::anim::Skeleton) -> BTreeMap<BoneId, BoneId> {
+    sk.bones
+        .iter()
+        .map(|(id, b)| {
+            let p = sk.bones.iter().find(|(_, x)| x.name == super::scene::mirror_name(&b.name)).map_or(*id, |(pid, _)| *pid);
+            (*id, p)
+        })
+        .collect()
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MirrorPose {
+    object: Option<String>,
+    /// flip (default), left_to_right, right_to_left.
+    mode: Option<String>,
+}
+
+fn mirror_pose(ctx: &mut Ctx, a: MirrorPose) -> Result<Out> {
+    let s = &ctx.doc.scene;
+    let obj = rig(s, resolve(s, &a.object)?);
+    let o = s.object(obj)?;
+    let Some(sk) = o.skeleton.clone() else { bail!("'{}' has no skeleton", o.name) };
+    let mode = a.mode.as_deref().unwrap_or("flip");
+    let from_side = match mode {
+        "flip" => None,
+        "left_to_right" => Some(true),
+        "right_to_left" => Some(false),
+        m => bail!("unknown mode '{m}' (flip, left_to_right, right_to_left)"),
+    };
+    let pairs = partners(&sk);
+    let old = o.pose.clone();
+    let mut new = if from_side.is_some() { old.clone() } else { BTreeMap::new() };
+    for (b, p) in &pairs {
+        if from_side.is_some_and(|l| side(&sk.bones[b].name) != Some(l) || p == b) {
+            continue;
+        }
+        let pose = old.get(b).copied().unwrap_or_default();
+        let m = polly_core::anim::mirror_bone_pose(&sk, *b, *p, pose);
+        if m.is_rest() {
+            new.remove(p);
+        } else {
+            new.insert(*p, m);
+        }
+    }
+    let changed = pairs.keys().filter(|b| old.get(b) != new.get(b)).count();
+    edit_scene(ctx, "mirror pose", |s| {
+        s.object_mut(obj)?.pose = new;
+        Ok(())
+    })?;
+    let unpaired: Vec<&str> = pairs.iter().filter(|(b, p)| b == p && side(&sk.bones[b].name).is_some()).map(|(b, _)| sk.bones[b].name.as_str()).collect();
+    let mut j = json!({"bones_changed": changed});
+    if !unpaired.is_empty() {
+        j["warning"] = json!(format!("no partner bone found for: {} (mirrored onto themselves)", unpaired.join(", ")));
+    }
+    super::view::maybe_preview(ctx, obj, Out::json(j))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CopyKeys {
+    clip: String,
+    object: Option<String>,
+    /// Source frame range [start, end], inclusive.
+    frames: [f32; 2],
+    /// Frame the copy starts at.
+    to_frame: f32,
+    /// Swap left/right with mirrored values (default false).
+    #[serde(default)]
+    mirror: bool,
+    /// Only these bones (source names; default all animated bones).
+    bones: Option<Vec<String>>,
+}
+
+fn copy_keys(ctx: &mut Ctx, a: CopyKeys) -> Result<Out> {
+    let s = &ctx.doc.scene;
+    let clip = s.resolve_clip(&a.clip)?;
+    let obj = rig(s, resolve(s, &a.object)?);
+    let o = s.object(obj)?;
+    let Some(sk) = o.skeleton.clone() else { bail!("'{}' has no skeleton", o.name) };
+    let only: Option<BTreeSet<BoneId>> = a.bones.as_ref().map(|ns| ns.iter().map(|n| bone_of(s, obj, n)).collect::<Result<_>>()).transpose()?;
+    let (t0, t1, to) = (secs(s, clip, a.frames[0]), secs(s, clip, a.frames[1]), secs(s, clip, a.to_frame));
+    if t1 < t0 {
+        bail!("frames must be [start, end] with start <= end");
+    }
+    let pairs = partners(&sk);
+    let c = &s.clips[&clip];
+    // Read everything first: the copy may overlap the source.
+    let mut writes: Vec<(Target, f32, Vec4)> = Vec::new();
+    for ch in &c.channels {
+        let (bone, kind) = match ch.target {
+            Target::BoneRotation { object, bone } if object == obj => (bone, 0),
+            Target::BoneTranslation { object, bone } if object == obj => (bone, 1),
+            Target::BoneScale { object, bone } if object == obj => (bone, 2),
+            _ => continue,
+        };
+        if only.as_ref().is_some_and(|o| !o.contains(&bone)) {
+            continue;
+        }
+        let dest = if a.mirror { pairs[&bone] } else { bone };
+        for k in ch.keys.iter().filter(|k| k.time >= t0 - 1e-5 && k.time <= t1 + 1e-5) {
+            let t = (k.time - t0 + to).min(c.length);
+            let mut p = polly_core::anim::BonePose::default();
+            match kind {
+                0 => p.rotation = polly_core::glam::Quat::from_vec4(k.value),
+                1 => p.translation = k.value.truncate(),
+                _ => p.scale = k.value.truncate(),
+            }
+            if a.mirror {
+                p = polly_core::anim::mirror_bone_pose(&sk, bone, dest, p);
+            }
+            let (target, v) = match kind {
+                0 => (Target::BoneRotation { object: obj, bone: dest }, Vec4::from(p.rotation)),
+                1 => (Target::BoneTranslation { object: obj, bone: dest }, p.translation.extend(0.0)),
+                _ => (Target::BoneScale { object: obj, bone: dest }, p.scale.extend(0.0)),
+            };
+            writes.push((target, t, v));
+        }
+    }
+    if writes.is_empty() {
+        bail!("no bone keys of '{}' in frames {}..{}", o.name, a.frames[0], a.frames[1]);
+    }
+    let n = writes.len();
+    edit_scene(ctx, "copy keys", |s| {
+        let c = s.clips.get_mut(&clip).unwrap();
+        for (target, t, v) in writes {
+            c.channel_mut(target).set_key(t, v);
+        }
+        Ok(())
+    })?;
+    Ok(Out::json(json!({"keys_written": n, "clip": clip_json(&ctx.doc.scene, clip)})))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -736,6 +925,8 @@ struct CreateClip {
     fps: f32,
     #[serde(default = "yes")]
     looping: bool,
+    /// Interpolation of its channels (default smooth).
+    interpolation: Option<Interpolation>,
 }
 
 fn f24() -> f32 {
@@ -752,6 +943,7 @@ fn create_clip(ctx: &mut Ctx, a: CreateClip) -> Result<Out> {
     edit_scene(ctx, "create clip", |s| {
         let mut c = anim::Clip::new(&a.name, a.frames / a.fps, a.fps);
         c.looping = a.looping;
+        c.interpolation = a.interpolation.unwrap_or(Interpolation::Smooth);
         Ok(s.add_clip(c))
     })?;
     Ok(Out::json(json!({"clip": a.name, "frames": a.frames, "fps": a.fps})))
@@ -768,6 +960,8 @@ struct UpdateClip {
     loop_start_frame: Option<f32>,
     /// Negative clears it (loop to the end).
     loop_end_frame: Option<f32>,
+    /// Interpolation of channels created from now on (existing ones: set_interpolation).
+    interpolation: Option<Interpolation>,
 }
 
 fn update_clip(ctx: &mut Ctx, a: UpdateClip) -> Result<Out> {
@@ -796,6 +990,9 @@ fn update_clip(ctx: &mut Ctx, a: UpdateClip) -> Result<Out> {
         if let Some(l) = a.looping {
             c.looping = l;
         }
+        if let Some(i) = a.interpolation {
+            c.interpolation = i;
+        }
         if let Some(f) = a.loop_start_frame {
             c.loop_start = f.max(0.0) / c.fps;
         }
@@ -817,6 +1014,7 @@ fn clip_json(s: &Scene, id: ClipId) -> Value {
         "fps": c.fps,
         "looping": c.looping,
         "loop_frames": [f(ls), f(le)],
+        "interpolation": c.interpolation,
         "channels": c.channels.len(),
         "keys": c.key_count(),
     })
@@ -870,9 +1068,7 @@ fn describe_clip(ctx: &mut Ctx, a: ClipArg) -> Result<Out> {
         .map(|ch| {
             let mut j = target_json(s, &ch.target);
             j["frames"] = json!(ch.keys.iter().map(|k| (k.time * c.fps * 100.0).round() / 100.0).collect::<Vec<_>>());
-            if ch.interpolation == Interpolation::Step {
-                j["interpolation"] = json!("step");
-            }
+            j["interpolation"] = json!(ch.interpolation);
             j
         })
         .collect();

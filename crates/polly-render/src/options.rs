@@ -108,6 +108,9 @@ pub struct Overlays {
     pub bones: bool,
     /// Bone name labels (implies nothing else; combine with `bones`).
     pub bone_names: bool,
+    /// Each bone's current axes at its head: X red, Y green (along the bone), Z blue.
+    /// pose_bone / set_key rotations turn about these (as shown in the rest pose).
+    pub bone_axes: bool,
     /// Also label elements that face away from / are hidden from the camera.
     pub backface_labels: bool,
     /// Reference images, in the front/right/top view they belong to. Default true.
@@ -131,6 +134,7 @@ impl Default for Overlays {
             object_names: false,
             bones: false,
             bone_names: false,
+            bone_axes: false,
             backface_labels: false,
             references: true,
         }

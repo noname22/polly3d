@@ -94,6 +94,20 @@ pub(crate) fn build(scene: &Scene, prep: &Prepared, ov: &Overlays, s: f32, frame
     for po in &prep.objects {
         let mesh = &po.mesh;
         let obj = &scene.objects[&po.id];
+        if ov.bone_axes
+            && let Some(sk) = &obj.skeleton
+        {
+            let m = scene.world_matrix(po.id);
+            for b in sk.bones.values() {
+                let f = m * b.rest_matrix();
+                let h = f.transform_point3(Vec3::ZERO);
+                let len = (m.transform_point3(b.tail) - m.transform_point3(b.head)).length().max(1e-3) * 0.35;
+                for (axis, color) in [(Vec3::X, [0.95, 0.25, 0.2, 1.0]), (Vec3::Y, [0.3, 0.9, 0.3, 1.0]), (Vec3::Z, [0.3, 0.5, 1.0, 1.0])] {
+                    let d = f.transform_vector3(axis).normalize_or_zero() * len;
+                    lb.line_on_top(h, h + d, color, 2.5);
+                }
+            }
+        }
         if ov.bones {
             if let Some(sk) = &obj.skeleton {
                 let m = scene.world_matrix(po.id);

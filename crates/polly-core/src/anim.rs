@@ -137,6 +137,15 @@ impl Skeleton {
         Ok(b)
     }
 
+    /// Object-space frame each bone's pose rotation turns about: its rest frame
+    /// carried along by its parents' pose (not its own). Axes are the columns.
+    pub fn pose_frames(&self, pose: &BTreeMap<BoneId, BonePose>) -> HashMap<BoneId, Mat4> {
+        self.world_matrices(pose)
+            .into_iter()
+            .map(|(id, (posed, _))| (id, posed * pose.get(&id).copied().unwrap_or_default().matrix().inverse()))
+            .collect()
+    }
+
     /// Object-space matrices of every bone for a pose: (posed, rest).
     pub fn world_matrices(&self, pose: &BTreeMap<BoneId, BonePose>) -> HashMap<BoneId, (Mat4, Mat4)> {
         let mut out: HashMap<BoneId, (Mat4, Mat4)> = HashMap::new();
@@ -150,6 +159,20 @@ impl Skeleton {
         }
         out
     }
+}
+
+/// Mirror a bone's pose across the skeleton's X = 0 plane onto `to` (its
+/// left/right partner, or itself for a centre bone). Works through the rest
+/// frames, so the result is right whatever the bones' roll.
+pub fn mirror_bone_pose(sk: &Skeleton, from: BoneId, to: BoneId, p: BonePose) -> BonePose {
+    let rf = Quat::from_mat4(&sk.bones[&from].rest_matrix()).normalize();
+    let rt = Quat::from_mat4(&sk.bones[&to].rest_matrix()).normalize();
+    // Object-space rotation, reflected: (w, x, y, z) -> (w, x, -y, -z).
+    let d = rf * p.rotation * rf.inverse();
+    let d = Quat::from_xyzw(d.x, -d.y, -d.z, d.w);
+    let t = rf * p.translation;
+    let t = Vec3::new(-t.x, t.y, t.z);
+    BonePose { translation: rt.inverse() * t, rotation: (rt.inverse() * d * rt).normalize(), scale: p.scale }
 }
 
 /// A bone's pose relative to its rest frame (in the bone's local space).
@@ -414,6 +437,17 @@ pub enum Interpolation {
     Linear,
     /// Hold each key until the next one.
     Step,
+    /// Smooth curve through the keys (Catmull-Rom): natural, flowing motion.
+    Smooth,
+    /// Ease in and out of every key (stops briefly at each): deliberate, mechanical moves.
+    Ease,
+}
+
+impl Interpolation {
+    /// Interpolated with Hermite tangents (exported as glTF CUBICSPLINE).
+    pub fn is_cubic(self) -> bool {
+        matches!(self, Interpolation::Smooth | Interpolation::Ease)
+    }
 }
 
 /// What a channel animates.
@@ -473,7 +507,66 @@ impl Channel {
         }
     }
 
+    /// Key values, rotations flipped onto one hemisphere (consecutive dot >= 0)
+    /// so they interpolate the short way.
+    pub fn aligned_values(&self) -> Vec<Vec4> {
+        let mut out: Vec<Vec4> = self.keys.iter().map(|k| k.value).collect();
+        if self.target.is_rotation() {
+            for i in 1..out.len() {
+                if out[i].dot(out[i - 1]) < 0.0 {
+                    out[i] = -out[i];
+                }
+            }
+        }
+        out
+    }
+
+    /// Hermite tangents per key (units per second) for cubic interpolation.
+    /// `cyclic`: the last key equals the first and the curve wraps around (a
+    /// looping cycle), so the ends get matching tangents.
+    pub fn tangents(&self, cyclic: bool) -> Vec<Vec4> {
+        let n = self.keys.len();
+        if self.interpolation != Interpolation::Smooth || n < 2 {
+            return vec![Vec4::ZERO; n];
+        }
+        let v = self.aligned_values();
+        let t: Vec<f32> = self.keys.iter().map(|k| k.time).collect();
+        let slope = |a: usize, b: usize, dt: f32| (v[b] - v[a]) / dt.max(1e-6);
+        (0..n)
+            .map(|i| {
+                if i > 0 && i < n - 1 {
+                    slope(i - 1, i + 1, t[i + 1] - t[i - 1])
+                } else if cyclic && n > 2 {
+                    // Neighbours across the loop point.
+                    let dt = (t[1] - t[0]) + (t[n - 1] - t[n - 2]);
+                    let mut prev = v[n - 2];
+                    let mut next = v[1];
+                    if self.target.is_rotation() {
+                        // v[n-1] and v[0] are the same rotation; keep both neighbours on its hemisphere.
+                        let at = v[i];
+                        if prev.dot(at) < 0.0 {
+                            prev = -prev;
+                        }
+                        if next.dot(at) < 0.0 {
+                            next = -next;
+                        }
+                    }
+                    (next - prev) / dt.max(1e-6)
+                } else if i == 0 {
+                    slope(0, 1, t[1] - t[0])
+                } else {
+                    slope(n - 2, n - 1, t[n - 1] - t[n - 2])
+                }
+            })
+            .collect()
+    }
+
     pub fn sample(&self, t: f32) -> Option<Vec4> {
+        self.sample_cyclic(t, false)
+    }
+
+    /// Sample at time `t`; `cyclic` as in [`Channel::tangents`].
+    pub fn sample_cyclic(&self, t: f32, cyclic: bool) -> Option<Vec4> {
         let first = self.keys.first()?;
         if t <= first.time {
             return Some(first.value);
@@ -488,6 +581,17 @@ impl Channel {
             return Some(a.value);
         }
         let u = (t - a.time) / (b.time - a.time).max(1e-9);
+        if self.interpolation.is_cubic() {
+            let v = self.aligned_values();
+            let m = self.tangents(cyclic);
+            let dt = b.time - a.time;
+            let (u2, u3) = (u * u, u * u * u);
+            let p = v[i - 1] * (2.0 * u3 - 3.0 * u2 + 1.0)
+                + m[i - 1] * dt * (u3 - 2.0 * u2 + u)
+                + v[i] * (-2.0 * u3 + 3.0 * u2)
+                + m[i] * dt * (u3 - u2);
+            return Some(if self.target.is_rotation() { Vec4::from(Quat::from_vec4(p).normalize()) } else { p });
+        }
         Some(if self.target.is_rotation() {
             let qa = Quat::from_vec4(a.value);
             let qb = Quat::from_vec4(b.value);
@@ -513,6 +617,9 @@ pub struct Clip {
     pub loop_start: f32,
     #[serde(default)]
     pub loop_end: Option<f32>,
+    /// Interpolation of channels created from now on.
+    #[serde(default)]
+    pub interpolation: Interpolation,
     #[serde(default)]
     pub channels: Vec<Channel>,
 }
@@ -526,7 +633,29 @@ fn yes() -> bool {
 
 impl Clip {
     pub fn new(name: &str, length: f32, fps: f32) -> Self {
-        Clip { name: name.into(), length, fps, looping: true, loop_start: 0.0, loop_end: None, channels: vec![] }
+        Clip {
+            name: name.into(),
+            length,
+            fps,
+            looping: true,
+            loop_start: 0.0,
+            loop_end: None,
+            interpolation: Interpolation::Linear,
+            channels: vec![],
+        }
+    }
+
+    /// A channel of a looping clip is a cycle when its keys span the loop
+    /// region and the last key repeats the first: it then wraps smoothly.
+    pub fn is_cyclic(&self, ch: &Channel) -> bool {
+        let (ls, le) = self.loop_range();
+        let (Some(a), Some(b)) = (ch.keys.first(), ch.keys.last()) else { return false };
+        let same = if ch.target.is_rotation() { a.value.dot(b.value).abs() > 1.0 - 1e-5 } else { a.value.abs_diff_eq(b.value, 1e-4) };
+        self.looping && ch.keys.len() > 2 && (a.time - ls).abs() < 1e-4 && (b.time - le).abs() < 1e-4 && same
+    }
+
+    pub fn sample(&self, ch: &Channel, t: f32) -> Option<Vec4> {
+        ch.sample_cyclic(t, self.is_cyclic(ch))
     }
 
     pub fn loop_range(&self) -> (f32, f32) {
@@ -548,7 +677,7 @@ impl Clip {
         match self.channels.iter().position(|c| c.target == target) {
             Some(i) => &mut self.channels[i],
             None => {
-                self.channels.push(Channel { target, interpolation: Interpolation::Linear, keys: vec![] });
+                self.channels.push(Channel { target, interpolation: self.interpolation, keys: vec![] });
                 self.channels.last_mut().unwrap()
             }
         }
@@ -611,7 +740,7 @@ pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
         }
         let t = p.time.clamp(0.0, clip.length);
         for ch in &clip.channels {
-            if let Some(v) = ch.sample(t) {
+            if let Some(v) = clip.sample(ch, t) {
                 contribs.entry(ch.target.clone()).or_default().push((v, p.weight));
             }
         }
@@ -669,32 +798,9 @@ pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
             out.objects.get_mut(&id).unwrap().mesh = Arc::new(mesh);
         }
     }
-    // Pass 3: objects attached to bones follow the posed bone. The display
-    // copy's bones are moved below, so solve for the local transform that
-    // places the object at parent × posed bone frame × local.
-    let attached: Vec<(ObjectId, ObjectId, BoneId)> = out
-        .objects
-        .iter()
-        .filter_map(|(id, o)| Some((*id, o.parent?, o.parent_bone?)))
-        .filter(|(_, p, b)| poses.get(p).is_some_and(|pose| !pose.is_empty()) && out.objects[p].skeleton.as_ref().is_some_and(|s| s.bones.contains_key(b)))
-        .collect();
-    let mut placed = Vec::new();
-    for (id, parent, bone) in attached {
-        let sk = out.objects[&parent].skeleton.as_ref().unwrap();
-        let (posed, rest) = sk.world_matrices(&poses[&parent])[&bone];
-        // The display copy's moved bone gives a rest_matrix without twist; compensate.
-        let mut moved = sk.bones[&bone].clone();
-        let skin = posed * rest.inverse();
-        moved.head = skin.transform_point3(moved.head);
-        moved.tail = skin.transform_point3(moved.tail);
-        let local = moved.rest_matrix().inverse() * posed * out.objects[&id].transform.matrix();
-        let (sc, r, t) = local.to_scale_rotation_translation();
-        placed.push((id, crate::scene::Transform { translation: t, rotation: r, scale: sc }));
-    }
-    for (id, t) in placed {
-        out.objects.get_mut(&id).unwrap().transform = t;
-    }
-    // Pass 4: move the bones of posed skeletons in the display copy.
+    // Pass 3: move the bones of posed skeletons in the display copy, keeping
+    // their twist (as roll), so each moved bone's rest frame is its posed
+    // frame. Objects attached to a bone then follow it without changes.
     for (id, pose) in &poses {
         if pose.is_empty() {
             continue;
@@ -706,6 +812,12 @@ pub fn pose_scene(scene: &Scene, plays: &[ClipPlay]) -> Scene {
             let skin = posed * rest.inverse();
             bone.head = skin.transform_point3(bone.head);
             bone.tail = skin.transform_point3(bone.tail);
+            // Keep the twist, so the moved bone's rest frame is the posed frame.
+            bone.roll = 0.0;
+            let untwisted = Quat::from_mat4(&bone.rest_matrix());
+            let (_, actual, _) = posed.to_scale_rotation_translation();
+            let twist = untwisted.inverse() * actual.normalize();
+            bone.roll = (2.0 * twist.y.atan2(twist.w)).to_degrees();
         }
     }
     out
@@ -759,6 +871,80 @@ pub fn deform_in(
 mod tests {
     use super::*;
     use crate::primitives::Primitive;
+
+    fn channel(interp: Interpolation, keys: &[(f32, f32)]) -> Channel {
+        let mut ch = Channel { target: Target::ObjectTranslation { object: 1 }, interpolation: interp, keys: vec![] };
+        for (t, v) in keys {
+            ch.set_key(*t, Vec4::new(*v, 0.0, 0.0, 0.0));
+        }
+        ch
+    }
+
+    #[test]
+    fn smooth_and_ease_curves() {
+        let keys = [(0.0, 0.0), (1.0, 1.0), (2.0, 0.0), (3.0, 2.0)];
+        let x = |ch: &Channel, t: f32| ch.sample(t).unwrap().x;
+        let slope = |ch: &Channel, t: f32, h: f32| (x(ch, t + h) - x(ch, t)) / h;
+        for interp in [Interpolation::Smooth, Interpolation::Ease] {
+            let ch = channel(interp, &keys);
+            for (t, v) in keys {
+                assert!((x(&ch, t) - v).abs() < 1e-5, "{interp:?} passes through its keys");
+            }
+        }
+        // Smooth: no kink at a key (left and right slopes agree); linear kinks.
+        let smooth = channel(Interpolation::Smooth, &keys);
+        assert!((slope(&smooth, 2.0, 1e-3) - slope(&smooth, 2.0, -1e-3)).abs() < 0.02);
+        let linear = channel(Interpolation::Linear, &keys);
+        assert!((slope(&linear, 2.0, 1e-3) - slope(&linear, 2.0, -1e-3)).abs() > 1.0);
+        // Ease: stops at every key.
+        let ease = channel(Interpolation::Ease, &keys);
+        assert!(slope(&ease, 1.0, 1e-3).abs() < 0.01 && slope(&ease, 1.0, -1e-3).abs() < 0.01);
+    }
+
+    #[test]
+    fn cyclic_channels_wrap_smoothly() {
+        let mut clip = Clip::new("walk", 2.0, 24.0);
+        clip.interpolation = Interpolation::Smooth;
+        let ch = clip.channel_mut(Target::ObjectTranslation { object: 1 });
+        for (t, v) in [(0.0, 0.0), (0.5, 1.0), (1.0, 0.0), (1.5, -1.0), (2.0, 0.0)] {
+            ch.set_key(t, Vec4::new(v, 0.0, 0.0, 0.0));
+        }
+        let ch = clip.channels[0].clone();
+        assert!(clip.is_cyclic(&ch));
+        let x = |t: f32| clip.sample(&ch, t).unwrap().x;
+        let (start, end) = ((x(0.001) - x(0.0)) / 0.001, (x(2.0) - x(1.999)) / 0.001);
+        assert!((start - end).abs() < 0.05, "slope at the loop point matches: {start} vs {end}");
+        assert!(start > 1.5, "a sine-like cycle rises through its start: {start}");
+        // A rotation channel wraps the short way too.
+        let mut c = Clip::new("spin", 1.0, 24.0);
+        let ch = c.channel_mut(Target::BoneRotation { object: 1, bone: 1 });
+        ch.interpolation = Interpolation::Smooth;
+        ch.set_key(0.0, Vec4::from(Quat::IDENTITY));
+        ch.set_key(0.5, Vec4::from(-Quat::from_rotation_x(0.5)));
+        ch.set_key(1.0, Vec4::from(Quat::IDENTITY));
+        let ch = c.channels[0].clone();
+        let q = Quat::from_vec4(c.sample(&ch, 0.25).unwrap());
+        assert!(q.angle_between(Quat::from_rotation_x(0.25)) < 0.05, "{q:?}");
+    }
+
+    #[test]
+    fn mirrored_pose_is_the_mirror_image() {
+        let mut sk = Skeleton::default();
+        let l = sk.add(Bone { name: "arm.L".into(), parent: None, head: Vec3::new(0.2, 1.0, 0.0), tail: Vec3::new(0.7, 1.0, 0.1), roll: 30.0 }).unwrap();
+        let r = sk.add(Bone { name: "arm.R".into(), parent: None, head: Vec3::new(-0.2, 1.0, 0.0), tail: Vec3::new(-0.7, 1.0, 0.1), roll: -75.0 }).unwrap();
+        let pose = BonePose { rotation: Quat::from_euler(glam::EulerRot::XYZ, 0.4, -0.3, 0.9), translation: Vec3::new(0.05, 0.1, -0.02), ..Default::default() };
+        let m = mirror_bone_pose(&sk, l, r, pose);
+        let wl = sk.world_matrices(&BTreeMap::from([(l, pose)]));
+        let wr = sk.world_matrices(&BTreeMap::from([(r, m)]));
+        let tip = |w: &HashMap<BoneId, (Mat4, Mat4)>, b: BoneId| {
+            let (posed, rest) = w[&b];
+            (posed * rest.inverse()).transform_point3(sk.bones[&b].tail)
+        };
+        let (a, b) = (tip(&wl, l), tip(&wr, r));
+        assert!(a.abs_diff_eq(Vec3::new(-b.x, b.y, b.z), 1e-4), "{a} vs {b}");
+        let head = |w: &HashMap<BoneId, (Mat4, Mat4)>, bn: BoneId| w[&bn].0.transform_point3(Vec3::ZERO);
+        assert!(head(&wl, l).abs_diff_eq(head(&wr, r) * Vec3::new(-1.0, 1.0, 1.0), 1e-4));
+    }
 
     fn arm() -> (Scene, ObjectId, BoneId, BoneId) {
         let mut s = Scene::default();

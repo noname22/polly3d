@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
 use polly_core::anim::{BoneId, Channel, Interpolation, Target};
-use polly_core::glam::{Mat4, Quat, Vec3};
+use polly_core::glam::{Mat4, Quat, Vec3, Vec4};
 use polly_core::mesh::VertId;
 use polly_core::scene::{Filter, ObjectId, Scene};
 use serde_json::{Value, json};
@@ -524,7 +524,11 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
         let mut add = |b: &mut Builder, times: &[f32], values: &[f32], comps: usize, interp: Interpolation, node: usize, path: &str| {
             let input = b.float_accessor(times, 1, true, None);
             let output = b.float_accessor(values, comps, false, None);
-            let interp = if interp == Interpolation::Step { "STEP" } else { "LINEAR" };
+            let interp = match interp {
+                Interpolation::Step => "STEP",
+                Interpolation::Linear => "LINEAR",
+                Interpolation::Smooth | Interpolation::Ease => "CUBICSPLINE",
+            };
             samplers_j.push(json!({"input": input, "output": output, "interpolation": interp}));
             channels_j.push(json!({"sampler": samplers_j.len() - 1, "target": {"node": node, "path": path}}));
         };
@@ -537,35 +541,39 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
             let Some(&obj_node) = node_of.get(&object) else { continue };
             let times: Vec<f32> = ch.keys.iter().map(|k| k.time).collect();
             let bone_target = |bone: &BoneId| skin_info.get(&object).and_then(|s| Some((s.joint_node.get(bone)?, s.local[bone])));
+            // Output values: per key, or [in-tangent, value, out-tangent] for cubic
+            // curves. `val` maps a Polly value to the glTF one, `tan` maps a tangent
+            // (the linear part of the same map).
+            let cyclic = clip.is_cyclic(ch);
+            let curve = |val: &dyn Fn(Vec4) -> Vec<f32>, tan: &dyn Fn(Vec4) -> Vec<f32>| -> Vec<f32> {
+                if ch.interpolation.is_cubic() {
+                    let v = ch.aligned_values();
+                    let m = ch.tangents(cyclic);
+                    v.iter().zip(&m).flat_map(|(v, m)| [tan(*m), val(*v), tan(*m)].concat()).collect()
+                } else {
+                    ch.keys.iter().flat_map(|k| val(k.value)).collect()
+                }
+            };
+            let xyz = |v: Vec4| v.truncate().to_array().to_vec();
+            let quat = |v: Vec4| Quat::from_vec4(v).to_array().to_vec();
             match &ch.target {
                 Target::BoneTranslation { bone, .. } => {
                     let Some((&n, (lt, lr))) = bone_target(bone) else { continue };
-                    let v: Vec<f32> = ch.keys.iter().flat_map(|k| (lt + lr * k.value.truncate()).to_array()).collect();
+                    let v = curve(&|v| (lt + lr * v.truncate()).to_array().to_vec(), &|m| (lr * m.truncate()).to_array().to_vec());
                     add(&mut b, &times, &v, 3, ch.interpolation, n, "translation");
                 }
                 Target::BoneRotation { bone, .. } => {
                     let Some((&n, (_, lr))) = bone_target(bone) else { continue };
-                    let v: Vec<f32> =
-                        ch.keys.iter().flat_map(|k| (lr * Quat::from_vec4(k.value)).normalize().to_array()).collect();
+                    let v = curve(&|v| (lr * Quat::from_vec4(v)).normalize().to_array().to_vec(), &|m| (lr * Quat::from_vec4(m)).to_array().to_vec());
                     add(&mut b, &times, &v, 4, ch.interpolation, n, "rotation");
                 }
                 Target::BoneScale { bone, .. } => {
                     let Some((&n, _)) = bone_target(bone) else { continue };
-                    let v: Vec<f32> = ch.keys.iter().flat_map(|k| k.value.truncate().to_array()).collect();
-                    add(&mut b, &times, &v, 3, ch.interpolation, n, "scale");
+                    add(&mut b, &times, &curve(&xyz, &xyz), 3, ch.interpolation, n, "scale");
                 }
-                Target::ObjectTranslation { .. } => {
-                    let v: Vec<f32> = ch.keys.iter().flat_map(|k| k.value.truncate().to_array()).collect();
-                    add(&mut b, &times, &v, 3, ch.interpolation, obj_node, "translation");
-                }
-                Target::ObjectRotation { .. } => {
-                    let v: Vec<f32> = ch.keys.iter().flat_map(|k| Quat::from_vec4(k.value).normalize().to_array()).collect();
-                    add(&mut b, &times, &v, 4, ch.interpolation, obj_node, "rotation");
-                }
-                Target::ObjectScale { .. } => {
-                    let v: Vec<f32> = ch.keys.iter().flat_map(|k| k.value.truncate().to_array()).collect();
-                    add(&mut b, &times, &v, 3, ch.interpolation, obj_node, "scale");
-                }
+                Target::ObjectTranslation { .. } => add(&mut b, &times, &curve(&xyz, &xyz), 3, ch.interpolation, obj_node, "translation"),
+                Target::ObjectRotation { .. } => add(&mut b, &times, &curve(&|v| Quat::from_vec4(v).normalize().to_array().to_vec(), &quat), 4, ch.interpolation, obj_node, "rotation"),
+                Target::ObjectScale { .. } => add(&mut b, &times, &curve(&xyz, &xyz), 3, ch.interpolation, obj_node, "scale"),
                 Target::MorphWeight { morph, .. } => {
                     if morph_nodes.contains_key(&object) && scene.objects[&object].mesh.morphs.iter().any(|m| &m.name == morph) {
                         morph_channels.entry(object).or_default().push(ch);
@@ -576,14 +584,20 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
         // glTF animates all morph weights of a node at once: merge per object.
         for (object, chans) in morph_channels {
             let o = &scene.objects[&object];
+            // Cubic channels can't share one sampler with others: bake them at the clip's frame rate.
+            let cubic = chans.iter().any(|c| c.interpolation.is_cubic());
             let mut times: Vec<f32> = chans.iter().flat_map(|c| c.keys.iter().map(|k| k.time)).collect();
+            if cubic {
+                let frames = (clip.length * clip.fps).ceil() as usize;
+                times.extend((0..=frames).map(|f| (f as f32 / clip.fps).min(clip.length)));
+            }
             times.sort_by(f32::total_cmp);
             times.dedup_by(|a, b| (*a - *b).abs() < 1e-5);
             let mut values = Vec::with_capacity(times.len() * o.mesh.morphs.len());
             for &t in &times {
                 for m in &o.mesh.morphs {
                     let ch = chans.iter().find(|c| matches!(&c.target, Target::MorphWeight { morph, .. } if *morph == m.name));
-                    let w = match ch.and_then(|c| c.sample(t)) {
+                    let w = match ch.and_then(|c| clip.sample(c, t)) {
                         Some(v) => v.x,
                         None => o.morph_weights.get(&m.name).copied().unwrap_or(0.0),
                     };

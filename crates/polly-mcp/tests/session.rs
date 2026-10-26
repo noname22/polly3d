@@ -973,3 +973,78 @@ fn files_seams_and_baking() {
     call_err(&s, "bake_shading", json!({"object": "Body", "ao": {}, "occluders": "self", "variants": {"top": "none"}}));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Feedback batch 2: smooth clips, bone axes, mirrored poses and keys.
+#[test]
+fn animation_batch() {
+    let s = server();
+    call(&s, "add_mesh", json!({"name": "Rig", "vertices": [], "faces": []}));
+    call(&s, "add_bone", json!({"object": "Rig", "name": "spine", "head": [0, 0.8, 0], "tail": [0, 1.4, 0]}));
+    call(&s, "add_bone", json!({"object": "Rig", "name": "arm.L", "head": [0.2, 1.3, 0], "tail": [0.8, 1.3, 0], "parent": "spine", "roll": 25}));
+    call(&s, "add_bone", json!({"object": "Rig", "name": "arm.R", "head": [-0.2, 1.3, 0], "tail": [-0.8, 1.3, 0], "parent": "spine", "roll": -60}));
+
+    // Axes in world terms, and which way a positive turn moves the tail.
+    let bones = call(&s, "list_bones", json!({"object": "Rig"}));
+    let arm = bones["bones"].as_array().unwrap().iter().find(|b| b["name"] == "arm.L").unwrap().clone();
+    assert_eq!(arm["axes"]["y"], "+X", "{arm}");
+    // Check the reported direction against an actual posed render-free computation.
+    let tail_after = |s: &polly_mcp::PollyServer, bone: &str| {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let shown = polly_core::anim::pose_scene(&g.doc.scene, &[]);
+        let o = shown.objects.values().find(|o| o.name == "Rig").unwrap();
+        let sk = o.skeleton.as_ref().unwrap();
+        sk.bones[&sk.find(bone).unwrap()].tail
+    };
+    call(&s, "pose_bone", json!({"object": "Rig", "bone": "arm.L", "rotation": [10, 0, 0]}));
+    let moved = tail_after(&s, "arm.L") - polly_core::glam::Vec3::new(0.8, 1.3, 0.0);
+    // An axis name, or a vector when the roll puts it between axes (here 25 degrees).
+    let v = &arm["axes"]["positive_x_turn_moves_tail"];
+    let dir = match v.as_str() {
+        Some("+Y") => polly_core::glam::Vec3::Y,
+        Some("-Y") => polly_core::glam::Vec3::NEG_Y,
+        Some("+Z") => polly_core::glam::Vec3::Z,
+        Some("-Z") => polly_core::glam::Vec3::NEG_Z,
+        Some(d) => panic!("{d}"),
+        None => polly_core::glam::Vec3::new(v[0].as_f64().unwrap() as f32, v[1].as_f64().unwrap() as f32, v[2].as_f64().unwrap() as f32),
+    };
+    assert!(moved.normalize().dot(dir) > 0.95, "reported {dir}, moved {moved}");
+
+    // Mirror the pose: arm.R's tail ends up at the mirror image of arm.L's.
+    call(&s, "mirror_pose", json!({"object": "Rig", "mode": "left_to_right"}));
+    let (l, r) = (tail_after(&s, "arm.L"), tail_after(&s, "arm.R"));
+    assert!(l.abs_diff_eq(r * polly_core::glam::Vec3::new(-1.0, 1.0, 1.0), 1e-4), "{l} vs {r}");
+    call(&s, "mirror_pose", json!({"object": "Rig"}));
+    assert!(tail_after(&s, "arm.L").abs_diff_eq(l, 1e-4), "flip keeps a symmetric pose symmetric");
+
+    // Clips are smooth by default; copy_keys mirrors one step into the next.
+    let c = call(&s, "create_clip", json!({"name": "walk", "frames": 24}));
+    assert!(c.to_string().contains("walk"));
+    assert_eq!(call(&s, "list_clips", json!({}))["clips"][0]["interpolation"], "smooth");
+    call(&s, "clear_pose", json!({"object": "Rig"}));
+    call(&s, "set_key", json!({"clip": "walk", "frame": 0, "object": "Rig", "bone": "arm.L", "value": [30, 0, 0]}));
+    call(&s, "set_key", json!({"clip": "walk", "frame": 0, "object": "Rig", "bone": "arm.R", "value": [-30, 0, 0]}));
+    let r = call(&s, "copy_keys", json!({"clip": "walk", "object": "Rig", "frames": [0, 0], "to_frame": 12, "mirror": true}));
+    assert_eq!(r["keys_written"], 2, "{r}");
+    call(&s, "copy_keys", json!({"clip": "walk", "object": "Rig", "frames": [0, 0], "to_frame": 24}));
+    let d = call(&s, "describe_clip", json!({"clip": "walk"}));
+    assert!(d["channels"].as_array().unwrap().iter().all(|c| c["interpolation"] == "smooth" && c["frames"] == json!([0.0, 12.0, 24.0])), "{d}");
+    // At frame 12 arm.R holds arm.L's frame-0 swing, mirrored.
+    let tails_at = |frame: f32| {
+        let ws = s.workspace.get("main").unwrap();
+        let g = ws.lock().unwrap();
+        let sc = &g.doc.scene;
+        let cid = *sc.clips.keys().next().unwrap();
+        let shown = polly_core::anim::pose_scene(sc, &[polly_core::anim::ClipPlay { clip: cid, time: frame / 24.0, weight: 1.0 }]);
+        let o = shown.objects.values().find(|o| o.name == "Rig").unwrap();
+        let sk = o.skeleton.as_ref().unwrap();
+        (sk.bones[&sk.find("arm.L").unwrap()].tail, sk.bones[&sk.find("arm.R").unwrap()].tail)
+    };
+    let ((l0, _), (_, r12)) = (tails_at(0.0), tails_at(12.0));
+    assert!(l0.abs_diff_eq(r12 * polly_core::glam::Vec3::new(-1.0, 1.0, 1.0), 1e-4), "{l0} vs {r12}");
+    // The bone_axes overlay renders (GPU permitting).
+    let r = s.call("render", json!({"view": "front", "overlays": {"bones": true, "bone_axes": true}}));
+    if r.is_error != Some(true) {
+        assert_eq!(images(&r).len(), 1);
+    }
+}

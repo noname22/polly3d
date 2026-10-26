@@ -79,7 +79,9 @@ pub(crate) fn setup(scene: &Scene, o: &RenderOptions, size: [u32; 2]) -> Setup {
             let objects = world_bounds(&focus_refs).or_else(|| world_bounds(&all_refs));
             // Unfocused axis views also frame their reference images.
             let refs = if focus.is_none() && o.overlays.references { reference_bounds(scene, &o.view) } else { None };
-            union(objects, refs).unwrap_or((Vec3::splat(-1.0), Vec3::splat(1.0)))
+            // Shown bones count too (an armature often has no mesh of its own).
+            let bones = if o.overlays.bones || o.overlays.bone_axes { bone_bounds(scene, focus.as_deref()) } else { None };
+            union(union(objects, refs), bones).unwrap_or((Vec3::splat(-1.0), Vec3::splat(1.0)))
         }
     };
     if prep.objects.is_empty() {
@@ -100,6 +102,17 @@ fn union(a: Option<(Vec3, Vec3)>, b: Option<(Vec3, Vec3)>) -> Option<(Vec3, Vec3
         (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.max(b.1))),
         (a, b) => a.or(b),
     }
+}
+
+/// World bounds of the bones of visible objects (only `focus` ones, if given).
+fn bone_bounds(scene: &Scene, focus: Option<&[polly_core::scene::ObjectId]>) -> Option<(Vec3, Vec3)> {
+    scene
+        .objects
+        .iter()
+        .filter(|(id, o)| o.visible && focus.is_none_or(|f| f.contains(id)))
+        .filter_map(|(id, o)| Some((scene.world_matrix(*id), o.skeleton.as_ref()?)))
+        .flat_map(|(m, sk)| sk.bones.values().flat_map(move |b| [m.transform_point3(b.head), m.transform_point3(b.tail)]))
+        .fold(None, |acc, p| union(acc, Some((p, p))))
 }
 
 /// The reference image view an axis view shows, if any.
