@@ -57,8 +57,11 @@ impl HasDisplayHandle for Display {
 #[derive(Clone, Copy, PartialEq)]
 enum Cam {
     Front,
+    Back,
+    Left,
     Right,
     Top,
+    Bottom,
     Persp,
     Orbit { yaw: f32, pitch: f32 },
 }
@@ -67,8 +70,11 @@ impl Cam {
     fn view(self) -> View {
         match self {
             Cam::Front => View::Front,
+            Cam::Back => View::Back,
+            Cam::Left => View::Left,
             Cam::Right => View::Right,
             Cam::Top => View::Top,
+            Cam::Bottom => View::Bottom,
             // Same angle as View::Persp but orbit framing, so the first drag doesn't jump.
             Cam::Persp => View::Orbit { yaw_deg: 35.0, pitch_deg: 25.0, distance: None },
             Cam::Orbit { yaw, pitch } => View::Orbit { yaw_deg: yaw, pitch_deg: pitch, distance: None },
@@ -79,8 +85,11 @@ impl Cam {
         match self {
             Cam::Orbit { yaw, pitch } => (yaw, pitch),
             Cam::Front => (0.0, 0.0),
+            Cam::Back => (180.0, 0.0),
+            Cam::Left => (-90.0, 0.0),
             Cam::Right => (90.0, 0.0),
             Cam::Top => (0.0, 89.0),
+            Cam::Bottom => (0.0, -89.0),
             Cam::Persp => (35.0, 25.0),
         }
     }
@@ -88,8 +97,11 @@ impl Cam {
     fn label(self) -> String {
         match self {
             Cam::Front => "front".into(),
+            Cam::Back => "back".into(),
+            Cam::Left => "left".into(),
             Cam::Right => "right".into(),
             Cam::Top => "top".into(),
+            Cam::Bottom => "bottom".into(),
             Cam::Persp => "persp".into(),
             Cam::Orbit { yaw, pitch } => format!("orbit {yaw:.0}°/{pitch:.0}°"),
         }
@@ -320,7 +332,7 @@ fn build_ui(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, workspace: &
     let several = workspace.names().len() > 1;
     shortcuts(ui, view, &mode, several);
     egui::Panel::top("toolbar").show(ui, |ui| {
-        ui.horizontal(|ui| match &mode {
+        ui.horizontal_wrapped(|ui| match &mode {
             Mode::Overview => {
                 ui.strong(format!("{} scenes", workspace.names().len()));
                 ui.label("— click one to open it");
@@ -456,8 +468,11 @@ impl RefState {
 fn ref_cam(v: RefView) -> Cam {
     match v {
         RefView::Front => Cam::Front,
+        RefView::Back => Cam::Back,
+        RefView::Left => Cam::Left,
         RefView::Right => Cam::Right,
         RefView::Top => Cam::Top,
+        RefView::Bottom => Cam::Bottom,
     }
 }
 
@@ -522,8 +537,11 @@ fn references_panel(ui: &mut egui::Ui, view: &mut ViewState, name: &str, agent: 
 /// The reference view for the current camera (Front when looking in perspective).
 fn current_ref_view(view: &mut ViewState) -> RefView {
     match view.cam {
+        Cam::Back => RefView::Back,
+        Cam::Left => RefView::Left,
         Cam::Right => RefView::Right,
         Cam::Top => RefView::Top,
+        Cam::Bottom => RefView::Bottom,
         _ => {
             view.cam = Cam::Front;
             RefView::Front
@@ -598,10 +616,14 @@ fn shortcuts(ui: &mut egui::Ui, view: &mut ViewState, mode: &Mode, several: bool
             view.mode = Mode::Overview;
         }
         if single {
-            for (key, cam) in [(Key::Num1, Cam::Front), (Key::Num2, Cam::Right), (Key::Num3, Cam::Top), (Key::Num4, Cam::Persp)] {
+            // Ctrl + 1/2/3 looks from the opposite side (as in Blender).
+            for (key, cam, opposite) in [(Key::Num1, Cam::Front, Cam::Back), (Key::Num2, Cam::Right, Cam::Left), (Key::Num3, Cam::Top, Cam::Bottom)] {
                 if i.key_pressed(key) {
-                    view.cam = cam;
+                    view.cam = if i.modifiers.ctrl { opposite } else { cam };
                 }
+            }
+            if i.key_pressed(Key::Num4) {
+                view.cam = Cam::Persp;
             }
         }
         if i.key_pressed(Key::W) {
@@ -632,7 +654,15 @@ fn toolbar(ui: &mut egui::Ui, view: &mut ViewState, name: &str, several: bool) {
     }
     ui.strong(name);
     ui.separator();
-    for (cam, label, key) in [(Cam::Front, "Front", "1"), (Cam::Right, "Right", "2"), (Cam::Top, "Top", "3"), (Cam::Persp, "Persp", "4")] {
+    for (cam, label, key) in [
+        (Cam::Front, "Front", "1"),
+        (Cam::Back, "Back", "Ctrl+1"),
+        (Cam::Right, "Right", "2"),
+        (Cam::Left, "Left", "Ctrl+2"),
+        (Cam::Top, "Top", "3"),
+        (Cam::Bottom, "Bottom", "Ctrl+3"),
+        (Cam::Persp, "Persp", "4"),
+    ] {
         if ui.selectable_label(view.cam == cam, label).on_hover_text(key).clicked() {
             view.cam = cam;
         }
@@ -641,8 +671,8 @@ fn toolbar(ui: &mut egui::Ui, view: &mut ViewState, name: &str, several: bool) {
     ui.checkbox(&mut view.overlays.wireframe, "Wireframe").on_hover_text("W");
     ui.checkbox(&mut view.overlays.grid, "Grid").on_hover_text("G");
     ui.checkbox(&mut view.overlays.selection, "Selection").on_hover_text("S");
-    ui.checkbox(&mut view.overlays.references, "Refs").on_hover_text("reference images (front/right/top views)");
-    if ui.add_enabled(view.ref_pick.is_none(), egui::Button::new("Add reference…")).on_hover_text("your own image for the current Front/Right/Top view, shown only here (or drop a file on the window)").clicked() {
+    ui.checkbox(&mut view.overlays.references, "Refs").on_hover_text("reference images (in their axis views)");
+    if ui.add_enabled(view.ref_pick.is_none(), egui::Button::new("Add reference…")).on_hover_text("your own image for the current axis view (Front when in perspective), shown only here (or drop a file on the window)").clicked() {
         pick_reference(ui, view, name);
     }
     egui::ComboBox::from_id_salt("filter")
@@ -766,7 +796,7 @@ fn single(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, shown: Option<
     ui.painter().text(
         rect.left_top() + egui::vec2(8.0, 6.0),
         egui::Align2::LEFT_TOP,
-        format!("{} ({})", view.cam.label(), if matches!(view.cam, Cam::Front | Cam::Right | Cam::Top) { "ortho" } else { "persp" }),
+        format!("{} ({})", view.cam.label(), if matches!(view.cam, Cam::Front | Cam::Back | Cam::Left | Cam::Right | Cam::Top | Cam::Bottom) { "ortho" } else { "persp" }),
         egui::FontId::monospace(13.0),
         egui::Color32::from_gray(220),
     );

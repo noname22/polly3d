@@ -171,7 +171,7 @@ pub struct Scene {
     /// Swappable gear: slot name -> variants (see `variants`).
     #[serde(default)]
     pub slots: BTreeMap<String, crate::variants::Slot>,
-    /// Reference images shown in the front/right/top views.
+    /// Reference images shown in the axis views.
     #[serde(default)]
     pub references: Vec<crate::reference::Reference>,
     #[serde(default)]

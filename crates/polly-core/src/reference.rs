@@ -1,5 +1,6 @@
 //! Reference images: pictures shown behind or over the model in one of the
-//! orthographic views, placed in world units so they zoom with the model.
+//! axis views (front, back, left, right, top, bottom), placed in world units
+//! so they zoom with the model.
 
 use std::sync::Arc;
 
@@ -15,17 +16,26 @@ use crate::scene::Scene;
 pub enum RefView {
     #[default]
     Front,
+    Back,
+    Left,
     Right,
     Top,
+    Bottom,
 }
 
 impl RefView {
-    /// World directions of the view's screen right (u) and screen up (v).
+    pub const ALL: [RefView; 6] = [RefView::Front, RefView::Back, RefView::Left, RefView::Right, RefView::Top, RefView::Bottom];
+
+    /// World directions of the view's screen right (u) and screen up (v),
+    /// as in the render views (a back image reads as drawn, not mirrored).
     pub fn axes(self) -> (Vec3, Vec3) {
         match self {
             RefView::Front => (Vec3::X, Vec3::Y),
+            RefView::Back => (Vec3::NEG_X, Vec3::Y),
+            RefView::Left => (Vec3::Z, Vec3::Y),
             RefView::Right => (Vec3::NEG_Z, Vec3::Y),
             RefView::Top => (Vec3::X, Vec3::NEG_Z),
+            RefView::Bottom => (Vec3::X, Vec3::Z),
         }
     }
 }
@@ -173,11 +183,14 @@ mod tests {
         assert_eq!(q[0].0, Vec3::new(-1.0, 4.0, 0.0));
         assert_eq!(q[2].0, Vec3::new(3.0, 0.0, 0.0));
         assert_eq!((q[0].1, q[2].1), ([0.5, 0.0], [1.0, 1.0]));
-        // right: u = -Z; top: v = -Z.
+        // right: u = -Z; top: v = -Z; back: u = -X; left: u = +Z; bottom: v = +Z.
         let q = reference(RefView::Right).quad();
         assert_eq!(q[0].0, Vec3::new(0.0, 4.0, 1.0));
         let q = reference(RefView::Top).quad();
         assert_eq!(q[0].0, Vec3::new(-1.0, 0.0, -4.0));
+        assert_eq!(reference(RefView::Back).quad()[0].0, Vec3::new(1.0, 4.0, 0.0));
+        assert_eq!(reference(RefView::Left).quad()[0].0, Vec3::new(0.0, 4.0, -1.0));
+        assert_eq!(reference(RefView::Bottom).quad()[0].0, Vec3::new(-1.0, 0.0, 4.0));
         // whole image: the width follows the aspect ratio.
         let mut r = reference(RefView::Front);
         r.crop = None;

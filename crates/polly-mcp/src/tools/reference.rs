@@ -1,4 +1,4 @@
-//! Reference images shown behind or over the model in the front/right/top views.
+//! Reference images shown behind or over the model in the axis views (front, back, left, right, top, bottom).
 
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ pub fn tools() -> Vec<ToolDef> {
     vec![
         def(
             "add_reference",
-            "Show an image file (PNG, JPEG...) as a reference in the front, right or top view, e.g. a character sheet to model over. It is placed in world units on that view's plane: `height` world units tall (width from the aspect ratio), centred at `center` = [u, v] in the view's screen axes (front: u=+X v=+Y; right: u=-Z v=+Y; top: u=+X v=-Z). Defaults: height 2, standing on the ground (centre [0, height/2]; top view: [0, 0]), behind the model at opacity 0.5. `crop` = [x, y, w, h] source pixels selects the part of the image to use (one view of a multi-view sheet). It is shown only when rendering that ortho view and zooms with the model. Re-adding a name replaces it.",
+            "Show an image file (PNG, JPEG...) as a reference in an axis view (front, back, left, right, top, bottom), e.g. a character sheet to model over. It is placed in world units on that view's plane: `height` world units tall (width from the aspect ratio), centred at `center` = [u, v] in the view's screen axes (front: u=+X v=+Y; back: u=-X v=+Y; left: u=+Z v=+Y; right: u=-Z v=+Y; top: u=+X v=-Z; bottom: u=+X v=+Z), so an image reads as drawn. Defaults: height 2, standing on the ground (centre [0, height/2]; top/bottom: [0, 0]), behind the model at opacity 0.5. `crop` = [x, y, w, h] source pixels selects the part of the image to use (one view of a multi-view sheet). It is shown only when rendering that ortho view and zooms with the model. Re-adding a name replaces it.",
             false,
             add_reference,
         ),
@@ -66,7 +66,7 @@ pub fn load_reference(path: &str, view: RefView, name: Option<&str>) -> Result<R
 /// Standing on the ground in the side views, centred in the top view.
 fn default_center(view: RefView, size: f32) -> [f32; 2] {
     match view {
-        RefView::Top => [0.0, 0.0],
+        RefView::Top | RefView::Bottom => [0.0, 0.0],
         _ => [0.0, size / 2.0],
     }
 }

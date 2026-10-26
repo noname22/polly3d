@@ -119,8 +119,11 @@ fn bone_bounds(scene: &Scene, focus: Option<&[polly_core::scene::ObjectId]>) -> 
 pub fn reference_view(view: &crate::View) -> Option<RefView> {
     match view {
         crate::View::Front => Some(RefView::Front),
+        crate::View::Back => Some(RefView::Back),
+        crate::View::Left => Some(RefView::Left),
         crate::View::Right => Some(RefView::Right),
         crate::View::Top => Some(RefView::Top),
+        crate::View::Bottom => Some(RefView::Bottom),
         _ => None,
     }
 }
@@ -785,7 +788,7 @@ impl Renderer {
             front: bool,
         }
         let mut ref_draws = Vec::new();
-        let shown_view = [RefView::Front, RefView::Right, RefView::Top].into_iter().find(|v| {
+        let shown_view = RefView::ALL.into_iter().find(|v| {
             let (u, up) = v.axes();
             cam.ortho && f.dot(-u.cross(up)) > 0.999
         });

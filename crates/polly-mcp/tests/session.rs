@@ -1119,3 +1119,37 @@ fn clothing_batch() {
     assert_eq!(nodes_of("blouse"), ["Body.under_Blazer+under_Blouse".to_string()].into());
     assert_eq!(nodes_of("blazer"), ["Body.under_Blazer".to_string(), "Body.under_Blazer+under_Blouse".to_string()].into());
 }
+
+/// Back/left/bottom references: each shows only in its own view, reading as drawn.
+#[test]
+fn opposite_view_references() {
+    let s = server();
+    let dir = std::env::temp_dir().join(format!("polly-ref6-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Red left half, green right half (as drawn).
+    let img = image::RgbaImage::from_fn(64, 32, |x, _| if x < 32 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 255, 0, 255]) });
+    let path = dir.join("lr.png");
+    img.save(&path).unwrap();
+    for v in ["back", "left", "bottom"] {
+        call(&s, "add_reference", json!({"path": path.to_str().unwrap(), "view": v, "name": v, "opacity": 1.0}));
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    let render = |view: &str| -> Option<image::RgbaImage> {
+        let r = s.call("render", json!({"view": view, "width": 200, "height": 200, "overlays": {"wireframe": false, "grid": false}, "legend": false}));
+        if r.is_error == Some(true) {
+            eprintln!("skipping: {}", text(&r));
+            return None;
+        }
+        Some(image::load_from_memory(&images(&r)[0]).unwrap().to_rgba8())
+    };
+    let Some(_) = render("back") else { return };
+    for v in ["back", "left", "bottom"] {
+        let img = render(v).unwrap();
+        // Red on the screen's left, green on its right: not mirrored.
+        let (l, r) = (img.get_pixel(60, 100), img.get_pixel(140, 100));
+        assert!(l[0] > 200 && l[1] < 50 && r[1] > 200 && r[0] < 50, "{v}: {l:?} {r:?}");
+    }
+    // Only one reference shows per view: the front view has none.
+    let front = render("front").unwrap();
+    assert!(!front.pixels().any(|p| p[0] > 200 && p[1] < 50 && p[2] < 50), "front shows no reference");
+}

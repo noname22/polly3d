@@ -27,7 +27,7 @@ the same effect as `hide_viewer`. The window is built with egui. With several
 scenes it opens on an overview of thumbnails: click one to view that scene
 alone, and use `< Back` (or Backspace/Esc) to return. In the single-scene view,
 the toolbar switches views, overlays and texture filtering. Left-drag orbits,
-the mouse wheel zooms, and the shortcuts are `1`–`4` (front/right/top/persp),
+the mouse wheel zooms, and the shortcuts are `1`–`4` (front/right/top/persp; Ctrl+`1`–`3` for back/left/bottom),
 `W` (wireframe), `G` (grid), `S` (selection highlight), `F` (cycle texture
 filter) and `R` (reset view).
 
@@ -127,7 +127,7 @@ format and [docs/bevy.md](docs/bevy.md) for using it in Bevy.
 ## Reference images
 
 A reference image (a character sheet, a blueprint) is shown behind or over the
-model in the front, right or top view. It is placed in world units, so it zooms
+model in one of the six axis views (front, back, left, right, top, bottom). It is placed in world units, so it zooms
 with the model and stays put while the camera re-frames. `crop` picks one view
 out of a multi-view sheet, and `height` scales it to the subject's real size.
 The agent manages references with `add_reference`, `update_reference`,
@@ -136,7 +136,7 @@ view and are saved in the project file.
 
 In the viewer:
 - The References panel shows or hides each of the agent's images, switches it between Behind and On top, and sets its opacity. These settings affect only the viewer; "Reset" returns to the agent's.
-- "Add reference…" in the toolbar loads your own image for the current Front/Right/Top view. Dropping an image file on the window does the same on X11, macOS and Windows; winit doesn't support file drops on Wayland. Your images are listed under "Mine": the agent never sees them, and they aren't saved in the project.
+- "Add reference…" in the toolbar loads your own image for the current axis view. Dropping an image file on the window does the same on X11, macOS and Windows; winit doesn't support file drops on Wayland. Your images are listed under "Mine": the agent never sees them, and they aren't saved in the project.
 
 ## Conventions the agent sees
 

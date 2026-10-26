@@ -113,7 +113,7 @@ pub struct Overlays {
     pub bone_axes: bool,
     /// Also label elements that face away from / are hidden from the camera.
     pub backface_labels: bool,
-    /// Reference images, in the front/right/top view they belong to. Default true.
+    /// Reference images, in the axis view they belong to. Default true.
     pub references: bool,
 }
 
