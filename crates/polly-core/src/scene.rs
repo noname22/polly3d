@@ -356,6 +356,11 @@ impl Material {
         }
     }
 
+    /// Shading needs per-vertex tangents (normal map or anisotropy).
+    pub fn needs_tangents(&self) -> bool {
+        self.normal_texture.is_some() || self.anisotropy.is_some()
+    }
+
     /// Emissive colour times strength is non-zero.
     pub fn is_emissive(&self) -> bool {
         self.emissive_strength > 0.0 && self.emissive.iter().any(|c| *c > 0.0)

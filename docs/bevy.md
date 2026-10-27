@@ -25,6 +25,18 @@ turns each into a `StandardMaterial` with nothing extra to do:
 
 Nearest-filtered textures carry a nearest sampler, which Bevy honours.
 
+> Bevy 0.20 computes the anisotropy direction only when the
+> `pbr_anisotropy_texture` cargo feature is on; without it, anisotropic
+> materials (e.g. Polly's hair cards) shade white. Enable that feature.
+
+## Levels of detail
+
+LOD nodes (`<name>.LOD1`, … with `extras.polly.lod`, see
+[gltf-extras.md](gltf-extras.md)) load hidden, like non-default variants.
+Bevy's `VisibilityRange` component switches meshes by camera distance: give
+the base node a range ending where LOD1's begins, and so on, and set each LOD
+node's `Visibility` to `Inherited`.
+
 ## Custom shaders
 
 Materials can name a custom shader (`extras.polly.shader`, see

@@ -1,8 +1,11 @@
 pub mod bevel;
 pub mod collide;
 pub mod cut;
+pub mod decimate;
 pub mod extrude;
+pub mod hair;
 pub mod loft;
+pub mod sculpt;
 pub mod shell;
 pub mod symmetry;
 pub mod topology;

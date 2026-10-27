@@ -535,7 +535,7 @@ impl Gpu {
             .iter()
             .map(|m| {
                 let mat = scene.materials.get(m);
-                (*m, mat.is_some_and(|m| m.double_sided), mat.is_some_and(|m| m.normal_texture.is_some()))
+                (*m, mat.is_some_and(|m| m.double_sided), mat.is_some_and(|m| m.needs_tangents()))
             })
             .collect();
         hash_of((id, Arc::as_ptr(mesh) as usize, world_bits(scene.world_matrix(id)), sig))
@@ -575,7 +575,7 @@ impl Gpu {
                 .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, verts.iter().map(|v| v.2).collect::<Vec<_>>())
                 .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, verts.iter().map(|v| v.3).collect::<Vec<_>>())
                 .with_inserted_indices(Indices::U32((0..n).collect()));
-            if scene.materials.get(&mid).is_some_and(|m| m.normal_texture.is_some()) {
+            if scene.materials.get(&mid).is_some_and(|m| m.needs_tangents()) {
                 let _ = mesh.generate_tangents();
             }
             let world = self.world();
@@ -626,7 +626,7 @@ impl Gpu {
                 .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, b.uv)
                 .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, b.col)
                 .with_inserted_indices(Indices::U32((0..n).collect()));
-            if scene.materials.get(&mid).is_some_and(|m| m.normal_texture.is_some()) {
+            if scene.materials.get(&mid).is_some_and(|m| m.needs_tangents()) {
                 // Degenerate UVs make mikktspace fail; the normal map then just doesn't show.
                 let _ = mesh.generate_tangents();
             }

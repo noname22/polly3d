@@ -81,6 +81,23 @@ The material is a normal glTF PBR material; `shader` names a fragment shader
 parameter is 1–4 numbers. The `bevy_polly` crate turns these into
 `PollyMaterial`s; see [bevy.md](bevy.md#custom-shaders).
 
+### On level-of-detail nodes
+
+`export_glb` with `lods` (e.g. `[0.5, 0.25]`) adds decimated copies of each
+mesh as sibling nodes named `<object>.LOD1`, `<object>.LOD2`, … with the
+same parent, transform, skin and morph targets. They are hidden by default
+(`KHR_node_visibility`), the base node lists them in the `MSFT_lod`
+extension (`"extensions": {"MSFT_lod": {"ids": [12, 13]}}`, used but not
+required), and each carries:
+
+```json
+"extras": { "polly": { "lod_of": "Body", "lod": 1, "ratio": 0.5 } }
+```
+
+`ratio` is the fraction of the base mesh's triangles the level aimed for.
+Object animation channels target only the base node; skinned LODs follow the
+shared skeleton.
+
 ### On the scene (`scenes[0].extras`)
 
 ```json

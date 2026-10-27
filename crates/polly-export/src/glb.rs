@@ -341,6 +341,10 @@ pub struct ExportOptions {
     pub objects: Option<Vec<ObjectId>>,
     /// Subdivision level for every object; `None` = each object's export level.
     pub subdivision: Option<u8>,
+    /// Levels of detail to add, as fractions of each mesh's triangles (e.g.
+    /// [0.5, 0.25]): decimated copies written as hidden `<name>.LOD<n>`
+    /// sibling nodes, listed in the base node's `MSFT_lod`.
+    pub lods: Vec<f32>,
 }
 
 /// Top-4, normalized joint indices and weights of a vertex; `None` when it has no usable weight.
@@ -389,9 +393,41 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
     } else {
         scene
     };
+    // Levels of detail: decimated copies as extra objects, patched below.
+    let with_lods;
+    let mut lod_of: BTreeMap<ObjectId, (ObjectId, usize, f32)> = BTreeMap::new();
+    let scene = if opts.lods.is_empty() {
+        scene
+    } else {
+        let mut s2 = scene.clone();
+        let wanted: Option<BTreeSet<ObjectId>> = opts.objects.as_ref().map(|l| l.iter().copied().collect());
+        for (&id, o) in &scene.objects {
+            if o.mesh.faces.is_empty() || !o.visible && wanted.is_none() || wanted.as_ref().is_some_and(|w| !w.contains(&id)) {
+                continue;
+            }
+            for (k, ratio) in opts.lods.iter().enumerate() {
+                let target = ((o.mesh.triangle_count() as f32) * ratio.clamp(0.01, 1.0)).round().max(4.0) as usize;
+                let mesh = polly_core::ops::decimate::decimate(&o.mesh, target);
+                let nid = s2.add_object(&format!("{}.LOD{}", o.name, k + 1), mesh);
+                let lo = s2.objects.get_mut(&nid).unwrap();
+                lo.transform = o.transform;
+                lo.parent = o.parent;
+                lo.parent_bone = o.parent_bone;
+                lo.morph_weights = o.morph_weights.clone();
+                lo.skin = match (o.skin, &o.skeleton) {
+                    (Some(b), _) => Some(b),
+                    (None, Some(_)) if !o.mesh.weights.is_empty() => Some(polly_core::scene::SkinBinding { armature: id }),
+                    _ => None,
+                };
+                lod_of.insert(nid, (id, k + 1, *ratio));
+            }
+        }
+        with_lods = s2;
+        &with_lods
+    };
     let mut b = Builder::default();
     let mut selected: BTreeSet<ObjectId> = match &opts.objects {
-        Some(list) => list.iter().copied().collect(),
+        Some(list) => list.iter().copied().chain(lod_of.iter().filter(|(_, (base, _, _))| list.contains(base)).map(|(l, _)| *l)).collect(),
         None => scene.objects.iter().filter(|(_, o)| o.visible).map(|(id, _)| *id).collect(),
     };
     // Descendants, plus what exported objects need: their armature and bone parents.
@@ -452,7 +488,7 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
         let m = material(mid);
         let (mj, exts) = material_json(&m, &tex_index);
         extensions_used.extend(exts);
-        if m.normal_texture.is_some_and(|t| tex_index.contains_key(&t)) {
+        if m.normal_texture.is_some_and(|t| tex_index.contains_key(&t)) || m.anisotropy.is_some() {
             needs_tangents.insert(*mid);
         }
         materials.push(mj);
@@ -689,6 +725,19 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
         }
     }
 
+    // Levels of detail: hidden sibling nodes, listed by the base node.
+    for (lod, (base, level, ratio)) in &lod_of {
+        let (Some(&ln), Some(&bn)) = (node_of.get(lod), node_of.get(base)) else { continue };
+        let ext = nodes[ln].as_object_mut().unwrap().entry("extensions").or_insert(json!({}));
+        ext["KHR_node_visibility"] = json!({"visible": false});
+        nodes[ln]["extras"] = json!({"polly": {"lod_of": scene.objects[base].name, "lod": level, "ratio": ratio}});
+        let ext = nodes[bn].as_object_mut().unwrap().entry("extensions").or_insert(json!({}));
+        let ids = ext.as_object_mut().unwrap().entry("MSFT_lod").or_insert(json!({"ids": []}));
+        ids["ids"].as_array_mut().unwrap().push(json!(ln));
+        extensions_used.insert("KHR_node_visibility");
+        extensions_used.insert("MSFT_lod");
+    }
+
     // 4. Variants: tag variant nodes; hide the non-default ones.
     for (slot, s) in &scene.slots {
         let members: BTreeSet<ObjectId> = s.variants.iter().flat_map(|v| v.objects.iter().copied()).collect();
@@ -698,7 +747,8 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
             let default = variants.contains(&s.default.as_str());
             nodes[n]["extras"] = json!({"polly": {"slot": slot, "variants": variants, "default": default}});
             if !default {
-                nodes[n]["extensions"] = json!({"KHR_node_visibility": {"visible": false}});
+                let ext = nodes[n].as_object_mut().unwrap().entry("extensions").or_insert(json!({}));
+                ext["KHR_node_visibility"] = json!({"visible": false});
                 extensions_used.insert("KHR_node_visibility");
             }
         }

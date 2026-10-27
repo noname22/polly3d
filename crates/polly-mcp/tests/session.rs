@@ -1758,3 +1758,64 @@ fn baked_normal_map_decodes_in_the_renderer() {
     assert!(d(flat, tilted) > 30, "the tilt must change the shading: flat {flat:?} tilted {tilted:?}");
     assert!(d(mapped, tilted) < d(flat, tilted) / 4, "mapped {mapped:?} should match tilted {tilted:?} (flat {flat:?})");
 }
+
+#[test]
+fn detail_and_lod() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "uv_sphere", "segments": 32, "rings": 16}, "name": "Head"}));
+    let size = |s: &PollyServer| call(s, "describe_mesh", json!({}))["local_bounds"]["max"][2].as_f64().unwrap();
+    let z0 = size(&s);
+    let r = call(&s, "brush", json!({"mode": "inflate", "points": [[0, 0, 0.5]], "radius": 0.3, "strength": 1.0}));
+    assert!(r["moved_verts"].as_u64().unwrap() > 5, "{r}");
+    assert!(size(&s) > z0 + 0.01, "inflated the front");
+    call(&s, "brush", json!({"mode": "displace", "scale": 0.05, "seed": 2, "points": [[0, 0.5, 0]], "radius": 0.3, "strength": 0.5, "mirror": true}));
+    call(&s, "brush", json!({"mode": "smooth", "points": [[0, 0.5, 0]], "radius": 0.3, "iterations": 3}));
+    call_err(&s, "brush", json!({"mode": "smooth", "radius": 0.3}));
+    // A stroke from a render.
+    if s.call("render", json!({"view": "front"})).is_error != Some(true) {
+        let r = call(&s, "brush", json!({"mode": "crease", "pixels": [[200, 300], [312, 300]], "radius": 0.1, "strength": 0.5}));
+        assert!(r["moved_verts"].as_u64().unwrap() > 0, "{r}");
+    }
+    // Hair cards on the top of the head.
+    call(&s, "select", json!({"query": {"by": "normal", "direction": [0, 1, 0], "angle": 50}}));
+    let h = call(&s, "add_hair_cards", json!({"count": 40, "length": 0.4, "gravity": 0.7, "variations": 4, "color": "#4a2c1a"}));
+    assert_eq!(h["cards"], 40);
+    let d = call(&s, "describe_scene", json!({}));
+    let hm = d["materials"].as_array().unwrap().iter().find(|m| m["name"] == "Head_hair_hair").unwrap().clone();
+    assert!(hm["anisotropy"].is_object() && hm["double_sided"] == true && hm["alpha_cutoff"].is_number(), "{hm}");
+    let r = s.call("render", json!({"view": "persp", "overlays": {"grid": false, "wireframe": false}, "legend": false}));
+    if r.is_error != Some(true) {
+        std::fs::write(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hair_cards.png"), &images(&r)[0]).unwrap();
+        call(&s, "update_material", json!({"material": "Head_hair_hair", "anisotropy": null}));
+        let r = s.call("render", json!({"view": "persp", "overlays": {"grid": false, "wireframe": false}, "legend": false}));
+        std::fs::write(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hair_cards_iso.png"), &images(&r)[0]).unwrap();
+    }
+    // Decimate a copy-like object, and export LODs without touching the head.
+    call(&s, "add_primitive", json!({"shape": {"kind": "uv_sphere", "segments": 24, "rings": 12}, "name": "Rock"}));
+    let r = call(&s, "decimate", json!({"object": "Rock", "ratio": 0.5}));
+    let t = &r["triangles"];
+    assert!(t["after"].as_u64().unwrap() <= t["target"].as_u64().unwrap() + 2, "{r}");
+    let dir = std::env::temp_dir().join(format!("polly-lod-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let glb = dir.join("lod.glb");
+    let head_tris = call(&s, "describe_mesh", json!({"object": "Head"}))["triangles"].as_u64().unwrap();
+    call(&s, "export_glb", json!({"path": glb.to_str().unwrap(), "objects": ["Head"], "lods": [0.5, 0.25]}));
+    let j = glb_json(&glb);
+    let nodes = j["nodes"].as_array().unwrap();
+    let base = nodes.iter().position(|n| n["name"] == "Head").unwrap();
+    let ids: Vec<usize> = nodes[base]["extensions"]["MSFT_lod"]["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(nodes[ids[0]]["name"], "Head.LOD1");
+    assert_eq!(nodes[ids[1]]["extensions"]["KHR_node_visibility"]["visible"], false);
+    assert_eq!(nodes[ids[1]]["extras"]["polly"]["lod"], 2);
+    assert!(j["extensionsUsed"].as_array().unwrap().contains(&json!("MSFT_lod")));
+    let (doc, buffers, _) = gltf::import(&glb).unwrap();
+    let tris_of = |name: &str| -> usize {
+        let n = doc.nodes().find(|n| n.name() == Some(name)).unwrap();
+        n.mesh().unwrap().primitives().map(|p| p.reader(|b| Some(&buffers[b.index()])).read_indices().unwrap().into_u32().count() / 3).sum()
+    };
+    assert_eq!(tris_of("Head") as u64, head_tris);
+    assert!(tris_of("Head.LOD1") <= (head_tris as usize) / 2 + 4 && tris_of("Head.LOD2") < tris_of("Head.LOD1"));
+    assert_eq!(call(&s, "describe_mesh", json!({"object": "Head"}))["triangles"].as_u64().unwrap(), head_tris, "export leaves the mesh alone");
+    std::fs::remove_dir_all(dir).ok();
+}

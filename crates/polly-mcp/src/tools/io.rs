@@ -98,6 +98,9 @@ struct Export {
     objects: Option<Vec<String>>,
     /// Subdivision level for every object (0 = cages); default: each object's export level (set_subdivision).
     subdivision: Option<u8>,
+    /// Levels of detail as fractions of each mesh's triangles, e.g. [0.5, 0.25]: decimated copies as hidden `<name>.LOD1`, `.LOD2` nodes (MSFT_lod on the base node, extras.polly.lod).
+    #[serde(default)]
+    lods: Vec<f32>,
 }
 
 fn export(ctx: &mut Ctx, a: Export) -> Result<Out> {
@@ -106,7 +109,7 @@ fn export(ctx: &mut Ctx, a: Export) -> Result<Out> {
         .as_ref()
         .map(|names| names.iter().map(|n| ctx.doc.scene.resolve(Some(n))).collect::<polly_core::Result<Vec<_>>>())
         .transpose()?;
-    let bytes = export_glb(&ctx.doc.scene, &ExportOptions { objects, subdivision: a.subdivision })?;
+    let bytes = export_glb(&ctx.doc.scene, &ExportOptions { objects, subdivision: a.subdivision, lods: a.lods.clone() })?;
     let mut path = PathBuf::from(&a.path);
     if path.extension().is_none() {
         path.set_extension("glb");

@@ -252,6 +252,7 @@ impl Mesh {
         let edges = self.edges();
         self.seams.retain(|e| edges.contains(e));
         self.sharp.retain(|e| edges.contains(e));
+        self.creases.retain(|e, _| edges.contains(e));
     }
 
     // ---- access -------------------------------------------------------

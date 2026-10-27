@@ -255,14 +255,14 @@ fn uv_layout(ctx: &mut Ctx, a: UvLayout) -> Result<Out> {
 
 /// Camera for a pixel of the last render (resolving contact-sheet tiles).
 /// The geometry the last render showed (posed the same way).
-fn last_scene(ctx: &Ctx) -> Scene {
+pub(crate) fn last_scene(ctx: &Ctx) -> Scene {
     match ctx.last_view.as_ref() {
         Some(l) => polly_core::variants::display(&ctx.doc.scene, &l.plays, &l.variants),
         None => polly_core::variants::display(&ctx.doc.scene, &[], &BTreeMap::new()),
     }
 }
 
-fn camera_at(ctx: &Ctx, x: f32, y: f32) -> Result<(CameraInfo, f32, f32)> {
+pub(crate) fn camera_at(ctx: &Ctx, x: f32, y: f32) -> Result<(CameraInfo, f32, f32)> {
     let lv = ctx.last_view.clone().context("nothing rendered in this scene yet; call render first")?;
     if lv.tiles.is_empty() {
         return Ok((lv.camera, x, y));

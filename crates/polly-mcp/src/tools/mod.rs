@@ -1,6 +1,7 @@
 pub mod anim;
 pub mod bake;
 pub mod common;
+pub mod detail;
 pub mod edit;
 pub mod history;
 pub mod io;
@@ -27,6 +28,7 @@ pub fn registry() -> Registry {
     tools.extend(lighting::tools());
     tools.extend(shader::tools());
     tools.extend(subdiv::tools());
+    tools.extend(detail::tools());
     tools.extend(query::tools());
     tools.extend(edit::tools());
     tools.extend(history::tools());

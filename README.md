@@ -171,6 +171,13 @@ hide groups carry over). Each object has a display level and an export level;
 (1 = for one level, higher = sharper, fractions blend); boundary edges are
 always sharp. Overlays, labels and picking show the cage.
 
+Detail and budget tools: `brush` sculpts dense meshes along a stroke (smooth,
+inflate, crease, displace with 3-D noise, flatten), `add_hair_cards` grows
+alpha-textured hair cards with anisotropic highlights from scalp faces,
+`decimate` reduces a mesh by quadric edge collapse (keeping borders, UV seams,
+sharp edges, weights and morphs), and `export_glb` `lods` writes decimated
+levels of detail as hidden `<name>.LODn` nodes (`MSFT_lod`).
+
 Undo keeps large textures (128² px and up) as the 64×64 tiles a step changed,
 so painting a 4K texture doesn't store a 64 MB copy per stroke.
 

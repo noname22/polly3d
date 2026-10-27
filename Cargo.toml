@@ -46,5 +46,8 @@ bevy = { version = "0.20.0", default-features = false, features = [
     "bevy_camera", "bevy_light", "bevy_color", "bevy_shader", "bevy_material", "bevy_window",
     "bevy_mikktspace", "bevy_post_process", "bevy_anti_alias",
     "tonemapping_luts", "ktx2", "zstd_rust",
+    # Bevy 0.20 only computes the anisotropy frame with this feature (without it
+    # anisotropic materials shade white).
+    "pbr_anisotropy_texture",
 ] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
