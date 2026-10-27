@@ -295,10 +295,13 @@ struct SkinInfo {
     skin: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default)]
 pub struct ExportOptions {
     /// Objects to export (with their descendants); `None` = all visible.
     /// Armatures and bone parents of exported objects are always included.
     pub objects: Option<Vec<ObjectId>>,
+    /// Subdivision level for every object; `None` = each object's export level.
+    pub subdivision: Option<u8>,
 }
 
 /// Top-4, normalized joint indices and weights of a vertex; `None` when it has no usable weight.
@@ -338,6 +341,15 @@ fn group_node_name(object: &str, parts: &BTreeSet<String>) -> String {
 }
 
 pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
+    // Subdivision modifiers: export the subdivided surfaces (skin weights,
+    // morphs and hide groups follow the cage).
+    let subdivided;
+    let scene = if opts.subdivision.unwrap_or(0) > 0 || scene.objects.values().any(|o| o.subdivision.is_some_and(|s| s.export() > 0)) {
+        subdivided = polly_core::subdiv::apply_for_export(scene, opts.subdivision);
+        &subdivided
+    } else {
+        scene
+    };
     let mut b = Builder::default();
     let mut selected: BTreeSet<ObjectId> = match &opts.objects {
         Some(list) => list.iter().copied().collect(),

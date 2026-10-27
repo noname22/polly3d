@@ -43,6 +43,7 @@ Workflow that works well
 3. Refine with select (by normal / box / loops / part) + extrude, inset, bevel, loop_cut, move/scale. Render again after each meaningful change.
    - Organic shaping: move/rotate/scale with `falloff` (soft selection; `connected: true` to leave nearby separate parts alone).
    - Single-sided sheets (hair, cloth, leaves): solidify to give them thickness.
+   - Smooth, dense surfaces (modern characters): keep a light quad cage and set_subdivision (Catmull–Clark modifier; you keep editing the cage by id, renders show the smooth surface, export writes it). set_crease keeps chosen edges hard; set_smooth for smooth shading. render `subdivision: 0` shows the cage.
    - Tubes from cross-sections (torso, limbs): loft through rings of points (sizes may differ); join tubes with bridge_loops (border edges or vertex lists; different counts are fine; closed: false bridges half-rings for branches like hips -> legs).
    - Poke-through: intersections lists where an object crosses others; push_out moves vertices that sink into a target back out (by a clearance).
    - Symmetric parts: build one side, then mirror_object for the other (names swap .L/.R), or mirror for a symmetric single mesh.

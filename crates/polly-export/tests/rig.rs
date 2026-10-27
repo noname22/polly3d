@@ -58,7 +58,7 @@ fn mat(m: [[f32; 4]; 4]) -> Mat4 {
 #[test]
 fn exports_skin_morphs_and_animation() {
     let (s, id) = rigged();
-    let bytes = export_glb(&s, &ExportOptions { objects: None }).unwrap();
+    let bytes = export_glb(&s, &ExportOptions::default()).unwrap();
     std::fs::write(concat!(env!("CARGO_TARGET_TMPDIR"), "/rigged.glb"), &bytes).unwrap();
     let (doc, buffers, _) = gltf::import_slice(&bytes).unwrap();
     let get = |b: gltf::Buffer| Some(&buffers[b.index()][..]);
@@ -169,7 +169,7 @@ fn unweighted_vertices_bind_to_root_joint() {
     let mesh = Arc::make_mut(&mut o.mesh);
     let v = *mesh.weights.keys().next().unwrap();
     mesh.weights.remove(&v);
-    let bytes = export_glb(&s, &ExportOptions { objects: None }).unwrap();
+    let bytes = export_glb(&s, &ExportOptions::default()).unwrap();
     let (doc, buffers, _) = gltf::import_slice(&bytes).unwrap();
     let skin = doc.skins().next().unwrap();
     let joints: Vec<gltf::Node> = skin.joints().collect();
@@ -189,7 +189,7 @@ fn dropped_bone_channels_are_skipped() {
     let sk = s.objects.get_mut(&id).unwrap().skeleton.as_mut().unwrap();
     let lower = sk.find("lower").unwrap();
     sk.remove(lower).unwrap();
-    let bytes = export_glb(&s, &ExportOptions { objects: None }).unwrap();
+    let bytes = export_glb(&s, &ExportOptions::default()).unwrap();
     let (doc, ..) = gltf::import_slice(&bytes).unwrap();
     assert_eq!(doc.animations().next().unwrap().channels().count(), 2);
 }
@@ -212,7 +212,7 @@ fn cubic_channels_match_polly_playback() {
         ch.set_key(t, Vec4::new(x, 2.0, 0.0, 0.0));
     }
     let cid = s.add_clip(c);
-    let bytes = export_glb(&s, &ExportOptions { objects: None }).unwrap();
+    let bytes = export_glb(&s, &ExportOptions::default()).unwrap();
     let (doc, buffers, _) = gltf::import_slice(&bytes).unwrap();
     let clip = &s.clips[&cid];
     let anim = doc.animations().find(|a| a.name() == Some("swing")).unwrap();

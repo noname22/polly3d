@@ -244,9 +244,10 @@ impl Gpu {
         // ---- meshes ----
         let mut shown: Vec<Entity> = Vec::new();
         for (oi, po) in frame.prep.objects.iter().enumerate() {
-            let key = self.object_key(scene, po.id, &po.mesh);
+            let level = polly_core::subdiv::display_level(scene, po.id, o.subdivision);
+            let key = hash_of((self.object_key(scene, po.id, &po.mesh), level));
             if !self.objects.contains_key(&key) {
-                let entry = self.build_object(scene, frame, oi)?;
+                let entry = if level > 0 { self.build_subdivided(scene, frame, oi, level)? } else { self.build_object(scene, frame, oi)? };
                 self.objects.insert(key, entry);
             }
             let entry = self.objects.get_mut(&key).unwrap();
@@ -538,6 +539,51 @@ impl Gpu {
             })
             .collect();
         hash_of((id, Arc::as_ptr(mesh) as usize, world_bits(scene.world_matrix(id)), sig))
+    }
+
+    /// Entities for the subdivided surface of an object (the cage stays in
+    /// the frame for overlays, labels and picking).
+    fn build_subdivided(&mut self, scene: &Scene, frame: &Frame, oi: usize, level: u8) -> Result<ObjectEntry> {
+        let po = &frame.prep.objects[oi];
+        let surface = polly_core::subdiv::subdivided(&po.mesh, level);
+        let m = scene.world_matrix(po.id);
+        let nm = m.inverse().transpose();
+        let normals = surface.corner_normals();
+        let mut batches: BTreeMap<u32, Vec<([f32; 3], [f32; 3], [f32; 2], [f32; 4])>> = BTreeMap::new();
+        for (&fid, f) in &surface.faces {
+            let b = batches.entry(f.material).or_default();
+            let n = f.len();
+            for k in 1..n - 1 {
+                let tri = if po.flip { [0, k + 1, k] } else { [0, k, k + 1] };
+                for i in tri {
+                    let c = &f.corners[i];
+                    let p = m.transform_point3(surface.verts[&f.verts[i]].pos);
+                    let nn = nm.transform_vector3(normals[&(fid, i)]).normalize_or_zero();
+                    b.push((p.to_array(), nn.to_array(), c.uv.to_array(), c.color.to_array()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (mid, verts) in batches {
+            if verts.is_empty() {
+                continue;
+            }
+            let n = verts.len() as u32;
+            let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+                .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, verts.iter().map(|v| v.0).collect::<Vec<_>>())
+                .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, verts.iter().map(|v| v.1).collect::<Vec<_>>())
+                .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, verts.iter().map(|v| v.2).collect::<Vec<_>>())
+                .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, verts.iter().map(|v| v.3).collect::<Vec<_>>())
+                .with_inserted_indices(Indices::U32((0..n).collect()));
+            if scene.materials.get(&mid).is_some_and(|m| m.normal_texture.is_some()) {
+                let _ = mesh.generate_tangents();
+            }
+            let world = self.world();
+            let mh = world.resource_mut::<Assets<Mesh>>().add(mesh);
+            let e = world.spawn((Mesh3d(mh.clone()), Transform::IDENTITY, NoFrustumCulling, Visibility::Hidden)).id();
+            out.push(Batch { material: mid, entity: e, mesh: mh });
+        }
+        Ok(ObjectEntry { _mesh: po.mesh.clone(), batches: out, last_used: self.job })
     }
 
     /// World-space mesh entities for one prepared object, one per material.

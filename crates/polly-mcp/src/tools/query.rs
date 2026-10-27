@@ -91,18 +91,19 @@ fn describe_mesh(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
         let name = ctx.doc.scene.materials.get(&f.material).map_or(format!("#{}", f.material), |m| m.name.clone());
         *mats.entry(name).or_default() += 1;
     }
+    let (edge_count, boundary) = m.edge_stats();
     let mut j = json!({
         "object": o.name,
         "parts": parts_json(m),
         "verts": m.verts.len(),
-        "edges": m.edges().len(),
+        "edges": edge_count,
         "faces": m.faces.len(),
         "triangles": m.triangle_count(),
         "face_sizes": sizes,
         "materials": mats,
         "seams": m.seams.len(),
         "sharp_edges": m.sharp.len(),
-        "boundary_edges": m.boundary_edges().len(),
+        "boundary_edges": boundary,
         "smooth_faces": m.faces.values().filter(|f| f.smooth).count(),
     });
     if let Some((lo, hi)) = m.bounds() {
@@ -111,8 +112,18 @@ fn describe_mesh(ctx: &mut Ctx, a: ObjectArg) -> Result<Out> {
     if !o.selection.is_empty() {
         j["selection"] = o.selection.to_json();
     }
-    let w = m.validate();
-    j["warnings"] = json!(w);
+    if let Some(sd) = o.subdivision {
+        j["subdivision"] = json!({
+            "level": sd.level, "export_level": sd.export(),
+            "shown_tris": super::subdiv::subdivided_tris(m, sd.level),
+            "exported_tris": super::subdiv::subdivided_tris(m, sd.export()),
+        });
+    }
+    if !m.creases.is_empty() {
+        j["creased_edges"] = json!(m.creases.len());
+    }
+    let p = polly_core::mesh::Mesh::problems_cached(m);
+    j["warnings"] = json!(p.warnings());
     Ok(Out::json(j))
 }
 

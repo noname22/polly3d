@@ -4,7 +4,7 @@
 //! outside. Per-corner attributes (UV, color) live on the face. Edges are not
 //! stored; they are derived from face loops as sorted vertex pairs.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glam::{Vec2, Vec3, Vec4};
 use serde::{Deserialize, Serialize};
@@ -110,6 +110,10 @@ pub struct Mesh {
     /// Hard edges for smooth shading.
     #[serde(default)]
     pub sharp: BTreeSet<Edge>,
+    /// Subdivision creases: sharpness per edge (1 = sharp for one level,
+    /// >= the subdivision level = fully sharp; fractions blend).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub creases: BTreeMap<Edge, f32>,
     /// Skin weights: per vertex, (bone, weight) pairs (see `anim`).
     #[serde(default)]
     pub weights: BTreeMap<VertId, Vec<(crate::anim::BoneId, f32)>>,
@@ -165,6 +169,14 @@ impl Mesh {
         self.next_face += 1;
         self.faces.insert(id, Face { verts, corners, material, smooth, part: None });
         Ok(id)
+    }
+
+    /// Insert a face without validation (callers guarantee a valid loop).
+    pub(crate) fn push_face_unchecked(&mut self, face: Face) -> FaceId {
+        let id = self.next_face;
+        self.next_face += 1;
+        self.faces.insert(id, face);
+        id
     }
 
     /// Add a face taking material, smoothing and part from a template face.
@@ -372,37 +384,82 @@ impl Mesh {
     /// Topology and geometry problems, structured so edits can report only
     /// the ones they introduced (see [`Problems::new_since`]).
     pub fn problems(&self) -> Problems {
-        let ef = self.edge_faces();
-        let nonmanifold = ef.values().filter(|f| f.len() > 2).count();
-        // Inconsistent winding: two faces traversing an edge in the same direction.
-        let mut dir: HashMap<(VertId, VertId), u32> = HashMap::new();
-        for f in self.faces.values() {
-            for h in f.half_edges() {
-                *dir.entry(h).or_default() += 1;
-            }
-        }
-        let flipped = dir.iter().filter(|(_, c)| **c > 1).count();
+        // One pass over half-edges: per undirected edge, how many faces use it
+        // and how many traverse it in its "forward" direction.
+        let mut edges: HashMap<(VertId, VertId), (u32, u32)> = HashMap::with_capacity(self.faces.len() * 2);
+        let mut used: HashSet<VertId> = HashSet::with_capacity(self.verts.len());
         let mut degenerate = BTreeSet::new();
         let mut nonplanar = BTreeSet::new();
+        let mut pts: Vec<Vec3> = Vec::with_capacity(8);
         for (&id, f) in &self.faces {
-            let p = self.face_positions(f);
-            let nv = newell_vector(&p);
-            if nv.length() < 1e-8 {
+            let n = f.verts.len();
+            pts.clear();
+            for i in 0..n {
+                let (a, b) = (f.verts[i], f.verts[(i + 1) % n]);
+                let e = edges.entry(if a < b { (a, b) } else { (b, a) }).or_default();
+                e.0 += 1;
+                if a < b {
+                    e.1 += 1;
+                }
+                used.insert(a);
+                pts.push(self.verts.get(&a).map_or(Vec3::ZERO, |v| v.pos));
+            }
+            let nv = newell_vector(&pts);
+            if nv.length_squared() < 1e-16 {
                 degenerate.insert(id);
                 continue;
             }
-            if p.len() > 3 {
-                let n = nv.normalize();
-                let c = p.iter().copied().sum::<Vec3>() / p.len() as f32;
-                let size = p.iter().map(|q| (*q - c).length()).fold(0.0, f32::max);
-                let dev = p.iter().map(|q| (*q - c).dot(n).abs()).fold(0.0, f32::max);
-                if dev > 0.02 * size.max(1e-6) {
+            if n > 3 {
+                let nrm = nv.normalize();
+                let c = pts.iter().copied().sum::<Vec3>() / n as f32;
+                let (mut size, mut dev) = (0.0f32, 0.0f32);
+                for q in &pts {
+                    let d = *q - c;
+                    size = size.max(d.length_squared());
+                    dev = dev.max(d.dot(nrm).abs());
+                }
+                if dev > 0.02 * size.sqrt().max(1e-6) {
                     nonplanar.insert(id);
                 }
             }
         }
-        let used: BTreeSet<VertId> = self.faces.values().flat_map(|f| f.verts.iter().copied()).collect();
+        let nonmanifold = edges.values().filter(|(c, _)| *c > 2).count();
+        // Inconsistent winding: two faces traversing an edge in the same direction.
+        let flipped = edges.values().map(|(c, fwd)| (*fwd > 1) as usize + ((c - fwd) > 1) as usize).sum();
         Problems { nonmanifold, flipped, degenerate, nonplanar, loose: self.verts.len() - used.len() }
+    }
+
+    /// [`problems`](Self::problems) of a shared mesh, cached while that mesh
+    /// is alive and unchanged (edits compare the before and after meshes, so
+    /// each mesh is checked once instead of twice).
+    pub fn problems_cached(mesh: &std::sync::Arc<Mesh>) -> Problems {
+        type Entry = (std::sync::Weak<Mesh>, Problems);
+        static CACHE: std::sync::Mutex<Vec<Entry>> = std::sync::Mutex::new(Vec::new());
+        {
+            let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((_, p)) = cache.iter().find(|(w, _)| w.upgrade().is_some_and(|a| std::sync::Arc::ptr_eq(&a, mesh))) {
+                return p.clone();
+            }
+        }
+        let p = mesh.problems();
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache.retain(|(w, _)| w.strong_count() > 0);
+        cache.push((std::sync::Arc::downgrade(mesh), p.clone()));
+        if cache.len() > 32 {
+            cache.remove(0);
+        }
+        p
+    }
+
+    /// (edge count, boundary edge count) in one pass.
+    pub fn edge_stats(&self) -> (usize, usize) {
+        let mut count: HashMap<(VertId, VertId), u32> = HashMap::with_capacity(self.faces.len() * 2);
+        for f in self.faces.values() {
+            for (a, b) in f.half_edges() {
+                *count.entry(if a < b { (a, b) } else { (b, a) }).or_default() += 1;
+            }
+        }
+        (count.len(), count.values().filter(|c| **c == 1).count())
     }
 
     pub fn validate(&self) -> Vec<String> {
@@ -502,6 +559,11 @@ pub struct Problems {
 impl Problems {
     pub fn is_empty(&self) -> bool {
         *self == Problems::default()
+    }
+
+    /// All problems as warning lines.
+    pub fn warnings(&self) -> Vec<String> {
+        self.describe(self.nonmanifold, self.flipped, &self.degenerate, &self.nonplanar, self.loose)
     }
 
     fn describe(&self, nonmanifold: usize, flipped: usize, degenerate: &BTreeSet<FaceId>, nonplanar: &BTreeSet<FaceId>, loose: usize) -> Vec<String> {

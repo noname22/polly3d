@@ -11,6 +11,7 @@ pub mod primitives;
 pub mod reference;
 pub mod scene;
 pub mod select;
+pub mod subdiv;
 pub mod variants;
 
 pub use error::{Error, Result};

@@ -75,6 +75,10 @@ pub struct Object {
     /// relative to the bone's frame and follows it when posed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_bone: Option<crate::anim::BoneId>,
+    /// Catmull–Clark subdivision applied for display and export (the mesh
+    /// itself stays the editable cage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdivision: Option<crate::subdiv::Subdivision>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +471,7 @@ impl Scene {
                 morph_edit: None,
                 skin: None,
                 parent_bone: None,
+                subdivision: None,
             },
         );
         self.active = Some(id);

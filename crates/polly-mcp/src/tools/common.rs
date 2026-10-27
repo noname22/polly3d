@@ -73,7 +73,7 @@ pub fn edit_mesh(
         report["note"] = json!("result elements are now the object's selection");
     }
     // Only problems this edit introduced; older ones are summarised in one line.
-    let (was, now) = (before.problems(), o.mesh.problems());
+    let (was, now) = (polly_core::mesh::Mesh::problems_cached(&before), polly_core::mesh::Mesh::problems_cached(&o.mesh));
     let warnings = now.new_since(&was);
     if !warnings.is_empty() {
         report["warnings"] = json!(warnings);

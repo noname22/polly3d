@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn glb_loads_with_gltf_crate() {
         let s = sample();
-        let bytes = export_glb(&s, &ExportOptions { objects: None }).unwrap();
+        let bytes = export_glb(&s, &ExportOptions::default()).unwrap();
         let (doc, buffers, images) = gltf::import_slice(&bytes).unwrap();
         assert_eq!(doc.nodes().count(), 2);
         assert_eq!(doc.scenes().next().unwrap().nodes().count(), 1);

@@ -57,7 +57,7 @@ fn scene() -> Scene {
 
 #[test]
 fn pbr_material_fields_and_extensions() {
-    let glb = export_glb(&scene(), &ExportOptions { objects: None }).unwrap();
+    let glb = export_glb(&scene(), &ExportOptions::default()).unwrap();
     let j = json_chunk(&glb);
     let mats = j["materials"].as_array().unwrap();
     let full = mats.iter().find(|m| m["name"] == "full").unwrap();
@@ -113,7 +113,7 @@ fn pbr_material_fields_and_extensions() {
 
 #[test]
 fn tangents_only_on_normal_mapped_primitives() {
-    let glb = export_glb(&scene(), &ExportOptions { objects: None }).unwrap();
+    let glb = export_glb(&scene(), &ExportOptions::default()).unwrap();
     let (doc, buffers, _) = gltf::import_slice(&glb).unwrap();
     let mut seen = (0, 0);
     for p in doc.meshes().flat_map(|m| m.primitives().collect::<Vec<_>>()) {

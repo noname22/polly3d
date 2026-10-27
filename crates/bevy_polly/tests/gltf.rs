@@ -21,7 +21,7 @@ fn shader_materials_are_swapped_in() {
     s.add_object("Box", mesh);
     let dir = std::env::temp_dir().join(format!("bevy-polly-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("shaders")).unwrap();
-    std::fs::write(dir.join("box.glb"), polly_export::export_glb(&s, &polly_export::ExportOptions { objects: None }).unwrap()).unwrap();
+    std::fs::write(dir.join("box.glb"), polly_export::export_glb(&s, &polly_export::ExportOptions::default()).unwrap()).unwrap();
     std::fs::write(dir.join("shaders/toon.wesl"), bevy_polly::shader_template("toon", &["tint".into()])).unwrap();
 
     let software = std::env::var("POLLY_ADAPTER").is_ok_and(|v| v == "software");

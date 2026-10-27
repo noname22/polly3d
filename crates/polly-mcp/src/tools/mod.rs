@@ -11,6 +11,7 @@ pub mod reference;
 pub mod scene;
 pub mod scenes;
 pub mod shader;
+pub mod subdiv;
 pub mod uv;
 pub mod variants;
 pub mod view;
@@ -24,6 +25,7 @@ pub fn registry() -> Registry {
     tools.extend(material::tools());
     tools.extend(lighting::tools());
     tools.extend(shader::tools());
+    tools.extend(subdiv::tools());
     tools.extend(query::tools());
     tools.extend(edit::tools());
     tools.extend(history::tools());

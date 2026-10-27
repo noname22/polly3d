@@ -108,6 +108,8 @@ struct RenderArgs {
     reference_opacity: Option<f32>,
     /// Reference images "behind" or "front" (on top), this render only.
     reference_layer: Option<polly_core::reference::Layer>,
+    /// Subdivision level for every object in this render (0 = show the editable cages); default: each object's level.
+    subdivision: Option<u8>,
     /// Lighting changes for this render only, layered over the scene's (same fields as set_lighting).
     lighting: Option<super::lighting::LightingPatch>,
 }
@@ -151,6 +153,7 @@ fn options(scene: &Scene, a: &RenderArgs, default_size: u32) -> Result<RenderOpt
         region: a.region,
         reference_opacity: a.reference_opacity,
         reference_layer: a.reference_layer,
+        subdivision: a.subdivision,
         lighting: a.lighting.as_ref().map(|p| p.apply(&scene.lighting)).transpose()?,
     })
 }

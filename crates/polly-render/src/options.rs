@@ -185,6 +185,8 @@ pub struct RenderOptions {
     pub reference_opacity: Option<f32>,
     /// Draw reference images behind or on top in this render only.
     pub reference_layer: Option<polly_core::reference::Layer>,
+    /// Subdivision level for every object in this render (0 = show the cages); default: each object's own level.
+    pub subdivision: Option<u8>,
     /// Lighting and camera effects for this render only (default: the scene's; see set_lighting).
     pub lighting: Option<polly_core::lighting::Lighting>,
     /// Frame these world bounds instead of the scene's (e.g. the rest pose, so
@@ -213,6 +215,7 @@ impl Default for RenderOptions {
             reference_opacity: None,
             reference_layer: None,
             lighting: None,
+            subdivision: None,
         }
     }
 }

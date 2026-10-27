@@ -96,6 +96,8 @@ struct Export {
     path: String,
     /// Object names to export (default: all visible).
     objects: Option<Vec<String>>,
+    /// Subdivision level for every object (0 = cages); default: each object's export level (set_subdivision).
+    subdivision: Option<u8>,
 }
 
 fn export(ctx: &mut Ctx, a: Export) -> Result<Out> {
@@ -104,7 +106,7 @@ fn export(ctx: &mut Ctx, a: Export) -> Result<Out> {
         .as_ref()
         .map(|names| names.iter().map(|n| ctx.doc.scene.resolve(Some(n))).collect::<polly_core::Result<Vec<_>>>())
         .transpose()?;
-    let bytes = export_glb(&ctx.doc.scene, &ExportOptions { objects })?;
+    let bytes = export_glb(&ctx.doc.scene, &ExportOptions { objects, subdivision: a.subdivision })?;
     let mut path = PathBuf::from(&a.path);
     if path.extension().is_none() {
         path.set_extension("glb");

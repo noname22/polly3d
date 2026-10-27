@@ -153,6 +153,19 @@ parameters. Polly renders it and reloads it when the file changes; the GLB
 carries the name and parameters in the material's extras, and the
 `bevy_polly` crate applies the same shader in the game.
 
+## Subdivision surfaces
+
+`set_subdivision` puts a Catmull–Clark modifier on an object: the mesh stays
+the low-poly cage that tools edit by id, while renders, the viewer and the
+GLB export use the subdivided surface (skin weights, morphs, UVs, parts and
+hide groups carry over). Each object has a display level and an export level;
+`render` and `export_glb` can override both. `set_crease` makes edges sharp
+(1 = for one level, higher = sharper, fractions blend); boundary edges are
+always sharp. Overlays, labels and picking show the cage.
+
+Undo keeps large textures (128² px and up) as the 64×64 tiles a step changed,
+so painting a 4K texture doesn't store a 64 MB copy per stroke.
+
 ## Lighting and effects
 
 Lighting is a scene setting (`set_lighting`), saved with the project; a

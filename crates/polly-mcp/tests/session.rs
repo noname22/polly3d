@@ -1632,3 +1632,54 @@ fn custom_shaders() {
     assert_eq!(m["extras"]["polly"]["shader"]["params"]["color"], json!([0.0, 0.0, 1.0, 1.0]));
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn subdivision_modifier() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Box"}));
+    let r = call(&s, "set_subdivision", json!({"level": 2, "export_level": 1}));
+    assert_eq!((r["shown_tris"].as_u64(), r["exported_tris"].as_u64(), r["cage_tris"].as_u64()), (Some(192), Some(48), Some(12)));
+    let d = call(&s, "describe_mesh", json!({}));
+    assert_eq!(d["subdivision"]["level"], 2);
+    assert_eq!(d["faces"], 6, "the cage is unchanged");
+    let opts = json!({"view": "front", "overlays": {"grid": false, "wireframe": false, "selection": false}, "legend": false, "width": 200, "height": 200});
+    let corner = |r: &CallToolResult| *image::load_from_memory(&images(r)[0]).unwrap().to_rgba8().get_pixel(26, 26);
+    let r = s.call("render", opts.clone());
+    let rendered = r.is_error != Some(true);
+    if rendered {
+        std::fs::write(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("subdiv_front.png"), &images(&r)[0]).unwrap();
+        let smooth = corner(&r);
+        let mut cage_opts = opts.clone();
+        cage_opts["subdivision"] = json!(0);
+        let cage = corner(&s.call("render", cage_opts));
+        assert_ne!(smooth, cage, "the smooth surface pulls in from the cage's corners");
+        // Fully creased: the cube keeps its corners.
+        call(&s, "set_crease", json!({"elements": ["all"], "value": 5}));
+        let creased = corner(&s.call("render", opts.clone()));
+        assert_eq!(creased, cage);
+        // Picking works on the cage.
+        let hit = call(&s, "pick", json!({"x": 100, "y": 100}));
+        assert!(hit["face"].as_str().unwrap().starts_with('f'), "{hit}");
+        call(&s, "set_crease", json!({"elements": ["all"], "value": 0}));
+    }
+    // Export: the export level, or an override.
+    let dir = std::env::temp_dir().join(format!("polly-subdiv-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tris = |sub: Option<u8>| {
+        let p = dir.join("s.glb");
+        let mut args = json!({"path": p.to_str().unwrap()});
+        if let Some(l) = sub {
+            args["subdivision"] = json!(l);
+        }
+        call(&s, "export_glb", args);
+        let (doc, buffers, _) = gltf::import(&p).unwrap();
+        doc.meshes().flat_map(|m| m.primitives().collect::<Vec<_>>()).map(|p| p.reader(|b| Some(&buffers[b.index()])).read_indices().unwrap().into_u32().count() / 3).sum::<usize>()
+    };
+    assert_eq!(tris(None), 48);
+    assert_eq!(tris(Some(0)), 12);
+    assert_eq!(tris(Some(2)), 192);
+    call(&s, "undo", json!({"steps": if rendered { 3 } else { 1 }}));
+    assert!(call(&s, "describe_mesh", json!({})).get("subdivision").is_none());
+    call_err(&s, "set_subdivision", json!({"level": 9}));
+    std::fs::remove_dir_all(dir).ok();
+}
