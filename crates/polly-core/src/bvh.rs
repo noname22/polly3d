@@ -109,6 +109,44 @@ impl Bvh {
         false
     }
 
+    /// Nearest hit of a ray from `o` along unit `d` within (`tmin`, `tmax`):
+    /// (triangle index, distance, barycentric weights of its three corners).
+    pub fn first_hit(&self, o: Vec3, d: Vec3, tmin: f32, tmax: f32) -> Option<(usize, f32, Vec3)> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let inv = d.recip();
+        let mut best: Option<(usize, f32)> = None;
+        let mut stack = vec![0usize];
+        while let Some(i) = stack.pop() {
+            let n = self.nodes[i];
+            let limit = best.map_or(tmax, |b| b.1);
+            if !ray_box(o, inv, n.lo, n.hi, limit) {
+                continue;
+            }
+            if n.count > 0 {
+                for k in n.start..n.start + n.count {
+                    if let Some(t) = ray_tri(o, d, &self.tris[k]) {
+                        if t > tmin && t < best.map_or(tmax, |b| b.1) {
+                            best = Some((k, t));
+                        }
+                    }
+                }
+            } else {
+                stack.push(n.start);
+                stack.push(n.start + 1);
+            }
+        }
+        let (k, t) = best?;
+        let p = o + d * t;
+        let [a, b, c] = self.tris[k].p;
+        let (v0, v1, v2) = (b - a, c - a, p - a);
+        let (d00, d01, d11, d20, d21) = (v0.dot(v0), v0.dot(v1), v1.dot(v1), v2.dot(v0), v2.dot(v1));
+        let den = (d00 * d11 - d01 * d01).max(1e-20);
+        let (v, w) = ((d11 * d20 - d01 * d21) / den, (d00 * d21 - d01 * d20) / den);
+        Some((k, t, Vec3::new(1.0 - v - w, v, w)))
+    }
+
     /// Indices of triangles whose bounds overlap the box [lo, hi].
     pub fn overlapping(&self, lo: Vec3, hi: Vec3) -> Vec<usize> {
         let mut out = Vec::new();

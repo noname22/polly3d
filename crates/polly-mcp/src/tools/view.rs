@@ -334,6 +334,8 @@ struct Stroke {
     mode: StrokeMode,
     /// Also paint the mirror image across a world plane (e.g. both eyes from one stroke).
     mirror: Option<MirrorPaint>,
+    #[serde(flatten)]
+    target: PaintTarget,
 }
 
 /// One surface hit of a stroke sample.
@@ -390,9 +392,10 @@ fn paint_stroke(ctx: &mut Ctx, a: Stroke) -> Result<Out> {
         }),
     };
     let s = last_scene(ctx);
+    let slot = a.target.slot()?;
     let texture_of = |obj: ObjectId, face: u32| -> Option<u32> {
         let f = s.objects.get(&obj)?.mesh.faces.get(&face)?;
-        s.materials.get(&f.material)?.texture
+        s.materials.get(&f.material)?.slot(slot)
     };
     let mut hits = vec![];
     let mut world_hits = vec![];
@@ -451,7 +454,7 @@ fn paint_stroke(ctx: &mut Ctx, a: Stroke) -> Result<Out> {
     edit_scene(ctx, "paint stroke", |s| {
         for (tid, pts) in &segments {
             let palette = s.textures[tid].palette.clone().and_then(|n| crate::colors::palette_named(s, &n));
-            let paint = polly_paint::Paint::new(a.color).with_blend(a.blend).with_palette(palette);
+            let paint = a.target.paint(s, polly_paint::Paint::new(a.color).with_blend(a.blend).with_palette(palette)).map_err(|e| polly_core::Error::Invalid(e.to_string()))?;
             let t = s.texture_mut(*tid)?;
             let n = polly_paint::stroke_uv(t, pts, radius, &paint);
             *changed.entry(t.name.clone()).or_default() += n;
@@ -548,6 +551,8 @@ struct Stamp {
     texture: Option<String>,
     #[serde(default)]
     blend: Blend,
+    #[serde(flatten)]
+    target: PaintTarget,
 }
 
 fn stamp(ctx: &mut Ctx, a: Stamp) -> Result<Out> {
@@ -576,11 +581,12 @@ fn stamp(ctx: &mut Ctx, a: Stamp) -> Result<Out> {
         _ => bail!("give either `pixel` or `point`"),
     };
     let doc = &ctx.doc.scene;
+    let slot = a.target.slot()?;
     let tid = match &a.texture {
         Some(t) => doc.resolve_texture(t)?,
         None => {
             let f = &doc.objects[&obj].mesh.faces[&face];
-            doc.materials.get(&f.material).and_then(|m| m.texture).context("the face there has no texture; pass `texture`")?
+            doc.materials.get(&f.material).and_then(|m| m.slot(slot)).with_context(|| format!("the face there has no {} texture; pass `texture`", slot.name()))?
         }
     };
     let faces = super::paint::faces_with_texture(doc, obj, tid);
@@ -590,7 +596,7 @@ fn stamp(ctx: &mut Ctx, a: Stamp) -> Result<Out> {
     let mut changed = 0;
     let name = edit_scene(ctx, "stamp", |s| {
         let palette = s.textures[&tid].palette.clone().and_then(|n| crate::colors::palette_named(s, &n));
-        let paint = polly_paint::Paint::new(a.color).with_blend(a.blend).with_palette(palette);
+        let paint = a.target.paint(s, polly_paint::Paint::new(a.color).with_blend(a.blend).with_palette(palette)).map_err(|e| polly_core::Error::Invalid(e.to_string()))?;
         let t = s.texture_mut(tid)?;
         changed = polly_paint::stamp(t, &map, center, normal, a.radius, a.inner_radius, a.color, outline, &paint);
         Ok(t.name.clone())
@@ -626,6 +632,8 @@ struct PaintLine {
     texture: Option<String>,
     #[serde(default)]
     blend: Blend,
+    #[serde(flatten)]
+    target: PaintTarget,
 }
 
 fn paint_line(ctx: &mut Ctx, a: PaintLine) -> Result<Out> {
@@ -696,11 +704,12 @@ fn paint_line(ctx: &mut Ctx, a: PaintLine) -> Result<Out> {
         }
     }
     let doc = &ctx.doc.scene;
+    let slot = a.target.slot()?;
     let tid = match &a.texture {
         Some(t) => doc.resolve_texture(t)?,
         None => {
             let f = &doc.objects[&obj].mesh.faces[&first_face.unwrap()];
-            doc.materials.get(&f.material).and_then(|m| m.texture).context("the face there has no texture; pass `texture`")?
+            doc.materials.get(&f.material).and_then(|m| m.slot(slot)).with_context(|| format!("the face there has no {} texture; pass `texture`", slot.name()))?
         }
     };
     let faces = super::paint::faces_with_texture(doc, obj, tid);
@@ -711,7 +720,7 @@ fn paint_line(ctx: &mut Ctx, a: PaintLine) -> Result<Out> {
     let mut changed = 0;
     let name = edit_scene(ctx, "paint line", |s| {
         let palette = s.textures[&tid].palette.clone().and_then(|n| crate::colors::palette_named(s, &n));
-        let paint = polly_paint::Paint::new(a.color).with_blend(a.blend).with_palette(palette);
+        let paint = a.target.paint(s, polly_paint::Paint::new(a.color).with_blend(a.blend).with_palette(palette)).map_err(|e| polly_core::Error::Invalid(e.to_string()))?;
         let t = s.texture_mut(tid)?;
         changed = polly_paint::surface_line(t, &map, &pts, &nrm, a.width, a.color, outline, dashes, &paint);
         Ok(t.name.clone())

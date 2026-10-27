@@ -22,6 +22,8 @@ pub struct Sample {
     pub pos: Vec3,
     pub normal: Vec3,
     pub face: FaceId,
+    /// Face corners and their weights at this texel.
+    pub corners: [(usize, f32); 3],
 }
 
 /// Surface samples for every texel covered by the faces' UVs.
@@ -46,7 +48,7 @@ impl SurfaceMap {
                 if cell.is_none() {
                     let pos = wts.iter().map(|&(i, k)| pts[i] * k).sum();
                     let normal = wts.iter().map(|&(i, k)| normals[&(fid, i)] * k).sum::<Vec3>().normalize_or_zero();
-                    *cell = Some(Sample { pos, normal, face: fid });
+                    *cell = Some(Sample { pos, normal, face: fid, corners: *wts });
                 }
             });
         }

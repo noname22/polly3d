@@ -15,9 +15,10 @@ pub mod palette;
 pub mod quantize;
 pub mod surface;
 
+pub mod bake;
 pub use canvas::{
     Blend, Dither, GradientDir, Paint, adjust, border, dither_fill, ellipse, flood_fill, gradient, line, noise, outline,
-    polygon, polyline, rect, replace_colors, set_pixels,
+    polygon, polyline, rect, replace_colors, set_pixels, StrengthMap,
 };
 pub use color::{Rgba, parse_color, to_hex};
 pub use faces::{Fill, bake_vertex_colors, face_mask, face_uv_polys, fill_faces, paint_at_uv, stroke_uv};

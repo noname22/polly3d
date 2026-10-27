@@ -190,3 +190,106 @@ pub fn nullable<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned
     }
 }
 
+
+/// Where paint goes beyond the texture: a material slot, a subset of channels,
+/// and an optional per-texel strength map. Flattened into the paint tools.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct PaintTarget {
+    /// Material slot whose texture is painted when `texture` is omitted: base (default), metallic_roughness, normal, occlusion, emissive.
+    pub slot: Option<String>,
+    /// Write only these channels: "r", "g", "b", "a" or combinations ("rgb"), or a name: roughness (g), metallic (b), occlusion / ao (r).
+    pub channel: Option<String>,
+    /// With `channel`: the value 0..1 written to those channels (instead of the colour's).
+    pub value: Option<f32>,
+    /// Paint strength per texel from a channel of another texture (e.g. a baked cavity or curvature map).
+    pub strength_map: Option<StrengthArg>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct StrengthArg {
+    pub texture: String,
+    /// "r" (default), "g", "b" or "a".
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub invert: bool,
+    /// Multiplier (default 1).
+    pub amount: Option<f32>,
+}
+
+fn channel_index(c: char) -> Option<usize> {
+    "rgba".find(c)
+}
+
+impl PaintTarget {
+    pub fn slot(&self) -> Result<polly_core::scene::Slot> {
+        match self.slot.as_deref() {
+            None => Ok(polly_core::scene::Slot::Base),
+            Some(n) => polly_core::scene::Slot::parse(n).ok_or_else(|| anyhow::anyhow!("unknown slot '{n}' (base, metallic_roughness, normal, occlusion, emissive)")),
+        }
+    }
+
+    pub fn channels(&self) -> Result<[bool; 4]> {
+        let Some(c) = self.channel.as_deref() else { return Ok([true; 4]) };
+        let mut m = [false; 4];
+        match c {
+            "roughness" => m[1] = true,
+            "metallic" => m[2] = true,
+            "occlusion" | "ao" => m[0] = true,
+            other => {
+                for ch in other.chars() {
+                    m[channel_index(ch).ok_or_else(|| anyhow::anyhow!("unknown channel '{other}' (r, g, b, a, rgb..., roughness, metallic, occlusion)"))?] = true;
+                }
+            }
+        }
+        Ok(m)
+    }
+
+    /// The colour to paint: `value` in the selected channels, if given.
+    pub fn color(&self, c: polly_paint::Rgba) -> Result<polly_paint::Rgba> {
+        let Some(v) = self.value else { return Ok(c) };
+        if self.channel.is_none() {
+            bail!("`value` needs `channel`");
+        }
+        let b = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let m = self.channels()?;
+        Ok(std::array::from_fn(|i| if m[i] { b } else { c[i] }))
+    }
+
+    /// Apply channel selection and strength map to a paint.
+    pub fn paint(&self, scene: &Scene, p: polly_paint::Paint) -> Result<polly_paint::Paint> {
+        let mut p = p.with_channels(self.channels()?);
+        p.color = self.color(p.color)?;
+        if self.channel.is_some() {
+            // Palette snapping is for colours, not data channels.
+            p.palette = None;
+        }
+        if let Some(sm) = &self.strength_map {
+            let t = &scene.textures[&scene.resolve_texture(&sm.texture)?];
+            let ch = match sm.channel.as_deref() {
+                None => 0,
+                Some(c) => c.chars().next().and_then(channel_index).filter(|_| c.len() == 1).ok_or_else(|| anyhow::anyhow!("strength_map channel must be r, g, b or a"))?,
+            };
+            p = p.with_strength(Some(polly_paint::StrengthMap {
+                width: t.width,
+                height: t.height,
+                pixels: t.pixels.clone(),
+                channel: ch,
+                invert: sm.invert,
+                amount: sm.amount.unwrap_or(1.0),
+            }));
+        }
+        Ok(p)
+    }
+}
+
+/// The texture in `slot` of the materials of `faces`, when they agree.
+pub fn texture_of_faces_slot(scene: &Scene, obj: u32, faces: &std::collections::BTreeSet<polly_core::mesh::FaceId>, slot: polly_core::scene::Slot) -> Result<polly_core::scene::TextureId> {
+    let o = scene.object(obj)?;
+    let mats: std::collections::BTreeSet<u32> = faces.iter().filter_map(|f| o.mesh.faces.get(f)).map(|f| f.material).collect();
+    let texs: std::collections::BTreeSet<_> = mats.iter().filter_map(|m| scene.materials.get(m)?.slot(slot)).collect();
+    match texs.len() {
+        1 => Ok(*texs.iter().next().unwrap()),
+        0 => bail!("these faces' material has no {} texture; pass `texture`, or create_texture with `material`, `slot` and `object`", slot.name()),
+        _ => bail!("faces use several {} textures; pass `texture` explicitly", slot.name()),
+    }
+}

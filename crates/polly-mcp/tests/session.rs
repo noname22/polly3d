@@ -1683,3 +1683,78 @@ fn subdivision_modifier() {
     call_err(&s, "set_subdivision", json!({"level": 9}));
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn pbr_texturing_and_baking() {
+    let s = server();
+    // A smooth ball: low cage with UVs, normal map from its subdivided surface.
+    call(&s, "add_primitive", json!({"shape": {"kind": "uv_sphere", "segments": 12, "rings": 6}, "name": "Ball"}));
+    call(&s, "set_smooth", json!({"elements": ["all"], "smooth": true}));
+    call(&s, "unwrap", json!({"texture_size": [128, 128]}));
+    call(&s, "create_texture", json!({"name": "Base", "width": 128, "height": 128, "fill": "#a05030", "material": "Skin", "object": "Ball"}));
+    let r = call(&s, "bake_maps", json!({"maps": ["normal", "ao", "cavity", "convexity"], "size": [128, 128]}));
+    assert_eq!(r["source"], "subdivided");
+    assert!(r["wired"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("normal")), "{r}");
+    let d = call(&s, "describe_scene", json!({}));
+    let skin = d["materials"].as_array().unwrap().iter().find(|m| m["name"] == "Skin").unwrap().clone();
+    assert_eq!(skin["normal_texture"], "Ball_normal");
+    assert_eq!(skin["occlusion_texture"], "Ball_ao");
+    // The normal map is not flat: the subdivided surface bends away from the cage's facets.
+    let stats = call(&s, "get_texture", json!({"texture": "Ball_normal"}));
+    assert!(stats["stats"]["unique_colors"].as_u64().unwrap() > 20, "{stats}");
+    // The cavity of a convex ball is empty (black); convexity is not.
+    let cav = call(&s, "get_texture", json!({"texture": "Ball_cavity"}));
+    let conv = call(&s, "get_texture", json!({"texture": "Ball_convexity"}));
+    assert_ne!(cav["stats"]["top_colors"][0], conv["stats"]["top_colors"][0], "{cav} {conv}");
+    // Paint into one channel: roughness (G) of a metallic-roughness map, only where convex.
+    call(&s, "create_texture", json!({"name": "MR", "width": 64, "height": 64, "kind": "data", "material": "Skin", "slot": "metallic_roughness"}));
+    call(&s, "fill_faces", json!({"elements": ["all"], "fill": {"type": "solid", "color": "#000000"}, "slot": "metallic_roughness", "channel": "roughness", "value": 0.25}));
+    let mr = call(&s, "get_texture", json!({"texture": "MR"}));
+    assert_eq!(mr["stats"]["top_colors"][0][0], "#ff40ff", "only G changed to 0.25: {mr}");
+    call(&s, "fill_faces", json!({"elements": ["all"], "fill": {"type": "solid", "color": "#ffffff"}, "slot": "metallic_roughness", "channel": "b", "strength_map": {"texture": "Ball_convexity"}}));
+    call_err(&s, "fill_faces", json!({"elements": ["all"], "fill": {"type": "solid", "color": "#ffffff"}, "channel": "q"}));
+    // Renders with the maps; export carries the normal map with tangents.
+    let r = s.call("render", json!({"view": "front", "overlays": {"grid": false, "wireframe": false}, "legend": false, "width": 256, "height": 256}));
+    if r.is_error != Some(true) {
+        std::fs::write(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("baked_ball.png"), &images(&r)[0]).unwrap();
+    }
+    let dir = std::env::temp_dir().join(format!("polly-bake-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let glb = dir.join("ball.glb");
+    call(&s, "export_glb", json!({"path": glb.to_str().unwrap()}));
+    let j = glb_json(&glb);
+    assert!(j["meshes"][0]["primitives"][0]["attributes"]["TANGENT"].is_number());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A normal map baked from a tilted plane makes a flat plane shade like the
+/// tilted one: the baked tangent frame matches what the renderer rebuilds.
+#[test]
+fn baked_normal_map_decodes_in_the_renderer() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "plane", "size": [2, 2]}, "name": "Low"}));
+    call(&s, "project_uv", json!({"object": "Low", "elements": ["all"], "projection": {"method": "planar"}}));
+    call(&s, "create_texture", json!({"name": "LowBase", "width": 32, "height": 32, "fill": "#c0c0c0", "material": "Flat", "object": "Low"}));
+    call(&s, "add_primitive", json!({"shape": {"kind": "plane", "size": [3, 3]}, "name": "High"}));
+    call(&s, "set_transform", json!({"object": "High", "rotation": [0, 0, 30]}));
+    call(&s, "create_material", json!({"name": "Grey", "color": "#c0c0c0"}));
+    call(&s, "assign_material", json!({"object": "High", "elements": ["all"], "material": "Grey"}));
+    let r = call(&s, "bake_maps", json!({"object": "Low", "maps": ["normal"], "source": ["High"], "size": [32, 32], "max_distance": 1.5}));
+    assert!(r["maps"]["normal"].get("missed_texels").is_none(), "{r}");
+    // Tangent-space normal of a surface tilted 30 degrees towards -X, with the tangent along +X.
+    assert_eq!(call(&s, "get_texture", json!({"texture": "Low_normal"}))["stats"]["top_colors"][0][0], "#4080ee");
+    let shot = |show: &str| {
+        let r = s.call("render", json!({"view": "top", "focus": [show], "isolate": true, "overlays": {"grid": false, "wireframe": false, "selection": false}, "legend": false, "width": 128, "height": 128, "lighting": {"view_lights": false, "sun": {"direction": [1, 2, 0.3]}}}));
+        if r.is_error == Some(true) {
+            return None;
+        }
+        Some(*image::load_from_memory(&images(&r)[0]).unwrap().to_rgba8().get_pixel(64, 64))
+    };
+    let Some(mapped) = shot("Low") else { return };
+    let tilted = shot("High").unwrap();
+    call(&s, "update_material", json!({"material": "Flat", "normal_texture": ""}));
+    let flat = shot("Low").unwrap();
+    let d = |a: image::Rgba<u8>, b: image::Rgba<u8>| (0..3).map(|i| (a[i] as i32 - b[i] as i32).abs()).sum::<i32>();
+    assert!(d(flat, tilted) > 30, "the tilt must change the shading: flat {flat:?} tilted {tilted:?}");
+    assert!(d(mapped, tilted) < d(flat, tilted) / 4, "mapped {mapped:?} should match tilted {tilted:?} (flat {flat:?})");
+}

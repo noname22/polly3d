@@ -95,14 +95,7 @@ fn edit_texture(ctx: &mut Ctx, tid: TextureId, label: &str, f: impl FnOnce(&mut 
 }
 
 fn texture_of_faces(scene: &Scene, obj: u32, faces: &BTreeSet<FaceId>) -> Result<TextureId> {
-    let o = scene.object(obj)?;
-    let mats: BTreeSet<u32> = faces.iter().filter_map(|f| o.mesh.faces.get(f)).map(|f| f.material).collect();
-    let texs: BTreeSet<TextureId> = mats.iter().filter_map(|m| scene.materials.get(m)?.texture).collect();
-    match texs.len() {
-        1 => Ok(*texs.iter().next().unwrap()),
-        0 => bail!("these faces' material has no texture; pass `texture`, or create_texture with `material` and `object`"),
-        _ => bail!("faces use several textures; pass `texture` explicitly"),
-    }
+    texture_of_faces_slot(scene, obj, faces, Slot::Base)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -373,6 +366,8 @@ struct Draw {
     clip_faces: Option<Vec<String>>,
     /// ...of this object (default active).
     object: Option<String>,
+    #[serde(flatten)]
+    target: PaintTarget,
 }
 
 fn face_polys(scene: &Scene, object: &Option<String>, ids: &Option<Vec<String>>) -> Result<Vec<Vec<[f32; 2]>>> {
@@ -393,8 +388,8 @@ fn draw(ctx: &mut Ctx, a: Draw) -> Result<Out> {
         None => None,
     };
     let w = a.width.unwrap_or(1);
-    edit_texture(ctx, tid, "draw", |t, s| {
-        let p = tex_paint(s, tid, a.color, a.blend).with_mask(mask);
+    let p = a.target.paint(&ctx.doc.scene, tex_paint(&ctx.doc.scene, tid, a.color, a.blend))?.with_mask(mask);
+    edit_texture(ctx, tid, "draw", |t, _| {
         match &a.shape {
             Shape::Line { from, to } => polly_paint::line(t, *from, *to, w, &p),
             Shape::Polyline { points } => polly_paint::polyline(t, points, w, &p),
@@ -419,6 +414,8 @@ struct FillFaces {
     grow_px: Option<u32>,
     #[serde(default)]
     blend: Blend,
+    #[serde(flatten)]
+    target: PaintTarget,
 }
 
 fn fill_faces(ctx: &mut Ctx, a: FillFaces) -> Result<Out> {
@@ -432,17 +429,19 @@ fn fill_faces(ctx: &mut Ctx, a: FillFaces) -> Result<Out> {
     }
     let tid = match &a.texture {
         Some(t) => s.resolve_texture(t)?,
-        None => texture_of_faces(s, id, &faces)?,
+        None => texture_of_faces_slot(s, id, &faces, a.target.slot()?)?,
+    };
+    let paint = a.target.paint(s, tex_paint(s, tid, [255; 4], a.blend))?;
+    let fill = match a.target.value {
+        Some(_) => Fill::Solid { color: a.target.color([0, 0, 0, 255])? },
+        None => a.fill.clone(),
     };
     let zero_uv = faces.iter().all(|f| mesh.faces[f].corners.iter().all(|c| c.uv == polly_core::glam::Vec2::ZERO));
     if zero_uv {
         bail!("these faces have no UVs yet; run unwrap or project_uv first");
     }
     let grow = a.grow_px.unwrap_or(1);
-    let mut out = edit_texture(ctx, tid, "fill faces", |t, s| {
-        let p = tex_paint(s, tid, [255; 4], a.blend);
-        polly_paint::fill_faces(t, &mesh, &faces, &a.fill, grow, &p)
-    })?;
+    let mut out = edit_texture(ctx, tid, "fill faces", |t, _| polly_paint::fill_faces(t, &mesh, &faces, &fill, grow, &paint))?;
     out.json["faces"] = json!(faces.len());
     Ok(out)
 }
@@ -505,6 +504,8 @@ struct PaintRegion {
     effect: RegionOp,
     #[serde(default)]
     blend: Blend,
+    #[serde(flatten)]
+    target: PaintTarget,
 }
 
 fn paint_region(ctx: &mut Ctx, a: PaintRegion) -> Result<Out> {
@@ -519,12 +520,13 @@ fn paint_region(ctx: &mut Ctx, a: PaintRegion) -> Result<Out> {
         (None, RegionArg::Faces { object, elements: ids, .. }) => {
             let id = resolve(s, object)?;
             let sel = elements(s, id, ids)?;
-            texture_of_faces(s, id, &sel.implied_faces(&s.object(id)?.mesh))?
+            texture_of_faces_slot(s, id, &sel.implied_faces(&s.object(id)?.mesh), a.target.slot()?)?
         }
         _ => bail!("pass `texture`"),
     };
-    edit_texture(ctx, tid, "paint region", |t, s| {
-        let p = tex_paint(s, tid, [255; 4], a.blend);
+    let p = a.target.paint(s, tex_paint(s, tid, [255; 4], a.blend))?;
+    edit_texture(ctx, tid, "paint region", |t, _| {
+        let p = p.clone();
         match &a.effect {
             RegionOp::Gradient { from, to, dir, dither, steps } => polly_paint::gradient(t, &region, *from, *to, dir, *dither, *steps, &p),
             RegionOp::Dither { a: ca, b, density, pattern } => polly_paint::dither_fill(t, &region, *ca, *b, *density, *pattern, &p),
@@ -547,14 +549,14 @@ struct UvStroke {
     radius_px: f32,
     #[serde(default)]
     blend: Blend,
+    #[serde(flatten)]
+    target: PaintTarget,
 }
 
 fn paint_uv_stroke(ctx: &mut Ctx, a: UvStroke) -> Result<Out> {
     let tid = ctx.doc.scene.resolve_texture(&a.texture)?;
-    edit_texture(ctx, tid, "uv stroke", |t, s| {
-        let p = tex_paint(s, tid, a.color, a.blend);
-        polly_paint::stroke_uv(t, &a.points, a.radius_px, &p)
-    })
+    let p = a.target.paint(&ctx.doc.scene, tex_paint(&ctx.doc.scene, tid, a.color, a.blend))?;
+    edit_texture(ctx, tid, "uv stroke", |t, _| polly_paint::stroke_uv(t, &a.points, a.radius_px, &p))
 }
 
 #[derive(Deserialize, JsonSchema)]

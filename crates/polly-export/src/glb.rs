@@ -216,6 +216,45 @@ impl Prim {
     }
 }
 
+/// The MikkTSpace tangent (xyz, handedness) the exporter writes for every face
+/// corner of `mesh` (object space): the same per-material welding and
+/// tangent generation as [`export_glb`], so baked normal maps decode
+/// identically in engines that use the exported tangents.
+pub fn corner_tangents(mesh: &polly_core::mesh::Mesh) -> HashMap<(polly_core::mesh::FaceId, usize), [f32; 4]> {
+    let normals = mesh.corner_normals();
+    let per_vertex = !mesh.weights.is_empty() || !mesh.morphs.is_empty();
+    let mut prims: BTreeMap<u32, (Prim, Vec<(polly_core::mesh::FaceId, usize)>)> = BTreeMap::new();
+    for (&fid, f) in &mesh.faces {
+        let pts = mesh.face_positions(f);
+        let (prim, corners) = prims.entry(f.material).or_default();
+        let vidx: Vec<u32> = (0..f.len())
+            .map(|i| {
+                let c = &f.corners[i];
+                let n = normals[&(fid, i)].normalize_or_zero();
+                prim.vertex(f.verts[i], per_vertex, pts[i].to_array(), n.to_array(), c.uv.to_array(), c.color.to_array(), None)
+            })
+            .collect();
+        for tri in polly_core::geom::triangulate_polygon(&pts) {
+            for k in tri {
+                prim.idx.push(vidx[k]);
+                corners.push((fid, k));
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for (_, (mut prim, corners)) in prims {
+        prim.add_tangents();
+        if prim.tangent.is_empty() {
+            continue;
+        }
+        for (k, c) in corners.into_iter().enumerate() {
+            let v = prim.idx[k] as usize;
+            out.entry(c).or_insert([prim.tangent[v * 4], prim.tangent[v * 4 + 1], prim.tangent[v * 4 + 2], prim.tangent[v * 4 + 3]]);
+        }
+    }
+    out
+}
+
 /// glTF material JSON and the extensions it uses.
 fn material_json(m: &polly_core::scene::Material, tex_index: &HashMap<u32, usize>) -> (Value, Vec<&'static str>) {
     let tex = |t: Option<u32>| t.and_then(|t| tex_index.get(&t)).copied();

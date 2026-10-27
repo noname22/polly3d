@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use polly_core::scene::{Scene, Texture};
 use serde_json::json;
 
-pub use glb::{ExportOptions, export_glb};
+pub use glb::{ExportOptions, corner_tangents, export_glb};
 
 const FORMAT: &str = "polly3d";
 const VERSION: u32 = 1;

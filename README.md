@@ -147,6 +147,14 @@ extensions, and adds MikkTSpace tangents to normal-mapped meshes. Renders use
 Bevy's `StandardMaterial`, so every channel shows up in the agent's images and
 the viewer just as it will in the game.
 
+Painting works on every channel: paint tools take a material `slot`, a
+`channel` (`roughness`, `metallic`, `occlusion` or `r`/`g`/`b`/`a`) with a
+`value`, and a `strength_map` (another texture's channel as per-texel
+strength). `bake_maps` bakes tangent-space normal maps (from the object's
+subdivided surface or a detailed object placed over it, using the same
+MikkTSpace tangents the export writes), ambient occlusion, and curvature,
+convexity and cavity masks for edge wear and grime.
+
 A material can also name a **custom shader**: a WESL fragment shader in the
 game's asset folder (`shaders/<name>.wesl`, written with `write_shader`) with
 parameters. Polly renders it and reloads it when the file changes; the GLB

@@ -70,6 +70,39 @@ pub struct Paint {
     #[serde(skip)]
     #[schemars(skip)]
     pub mask: Option<Mask>,
+    /// Which of R, G, B, A are written (e.g. only G = roughness in a
+    /// metallic-roughness map); the others keep their value.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub channels: [bool; 4],
+    /// Per-texel paint strength from another texture's channel (e.g. a
+    /// baked cavity map): the result is blended with the old pixel by it.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub strength: Option<StrengthMap>,
+}
+
+/// One channel of a texture used as paint strength (sampled nearest, scaled
+/// to the painted texture's size).
+#[derive(Debug, Clone)]
+pub struct StrengthMap {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: std::sync::Arc<Vec<u8>>,
+    pub channel: usize,
+    pub invert: bool,
+    /// Multiplier on the strength (default 1).
+    pub amount: f32,
+}
+
+impl StrengthMap {
+    /// Strength 0..1 for texel (x, y) of a `w` x `h` texture.
+    pub fn at(&self, x: i32, y: i32, w: u32, h: u32) -> f32 {
+        let sx = ((x as u64 * self.width as u64) / w.max(1) as u64).min(self.width as u64 - 1) as u32;
+        let sy = ((y as u64 * self.height as u64) / h.max(1) as u64).min(self.height as u64 - 1) as u32;
+        let v = self.pixels.get(((sy * self.width + sx) * 4) as usize + self.channel).copied().unwrap_or(0) as f32 / 255.0;
+        ((if self.invert { 1.0 - v } else { v }) * self.amount).clamp(0.0, 1.0)
+    }
 }
 
 impl Default for Paint {
@@ -81,7 +114,7 @@ impl Default for Paint {
 impl Paint {
     /// Replace-blend paint with no palette lock or mask.
     pub fn new(color: Rgba) -> Self {
-        Paint { color, blend: Blend::Replace, palette: None, mask: None }
+        Paint { color, blend: Blend::Replace, palette: None, mask: None, channels: [true; 4], strength: None }
     }
     pub fn with_blend(mut self, blend: Blend) -> Self {
         self.blend = blend;
@@ -94,6 +127,30 @@ impl Paint {
     pub fn with_mask(mut self, mask: Option<Mask>) -> Self {
         self.mask = mask;
         self
+    }
+    pub fn with_channels(mut self, channels: [bool; 4]) -> Self {
+        self.channels = channels;
+        self
+    }
+    pub fn with_strength(mut self, s: Option<StrengthMap>) -> Self {
+        self.strength = s;
+        self
+    }
+    /// Final value of a texel: blend, palette snap, channel selection, strength.
+    pub fn resolve(&self, dst: Rgba, src: Rgba, x: i32, y: i32, w: u32, h: u32) -> Rgba {
+        let mut out = blend(dst, src, self.blend);
+        if let Some(pal) = &self.palette {
+            out = nearest(pal, out).1;
+        }
+        for i in 0..4 {
+            if !self.channels[i] {
+                out[i] = dst[i];
+            }
+        }
+        if let Some(sm) = &self.strength {
+            out = lerp(dst, out, sm.at(x, y, w, h));
+        }
+        out
     }
 }
 
@@ -129,7 +186,7 @@ pub(crate) fn pixel(tex: &Texture, x: i32, y: i32) -> Option<Rgba> {
 /// Write `f(x, y, current)` to every texel of `cov` (and `p.mask`), with
 /// blending and palette snapping. Returns changed-pixel count.
 pub(crate) fn apply(tex: &mut Texture, cov: &Mask, p: &Paint, mut f: impl FnMut(i32, i32, Rgba) -> Option<Rgba>) -> usize {
-    let w = tex.width;
+    let (w, th) = (tex.width, tex.height);
     let coords: Vec<(i32, i32)> = cov
         .iter()
         .filter(|&(x, y)| (x as u32) < w && (y as u32) < tex.height && p.mask.as_ref().is_none_or(|m| m.get(x, y)))
@@ -140,10 +197,7 @@ pub(crate) fn apply(tex: &mut Texture, cov: &Mask, p: &Paint, mut f: impl FnMut(
         let i = ((y as u32 * w + x as u32) * 4) as usize;
         let dst: Rgba = px[i..i + 4].try_into().unwrap();
         let Some(src) = f(x, y, dst) else { continue };
-        let mut out = blend(dst, src, p.blend);
-        if let Some(pal) = &p.palette {
-            out = nearest(pal, out).1;
-        }
+        let out = p.resolve(dst, src, x, y, w, th);
         if out != dst {
             px[i..i + 4].copy_from_slice(&out);
             changed += 1;
