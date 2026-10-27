@@ -378,6 +378,9 @@ pub struct Scene {
     /// Reference images shown in the axis views.
     #[serde(default)]
     pub references: Vec<crate::reference::Reference>,
+    /// Lights and camera effects for renders.
+    #[serde(default, skip_serializing_if = "crate::lighting::Lighting::is_default")]
+    pub lighting: crate::lighting::Lighting,
     #[serde(default)]
     next_clip: crate::anim::ClipId,
     next_object: ObjectId,
@@ -403,6 +406,7 @@ impl Default for Scene {
             clips: BTreeMap::new(),
             slots: BTreeMap::new(),
             references: Vec::new(),
+            lighting: Default::default(),
             next_clip: 1,
             next_object: 1,
             next_material: 1,

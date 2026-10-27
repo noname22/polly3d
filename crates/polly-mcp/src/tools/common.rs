@@ -178,3 +178,15 @@ pub fn round3(v: Vec3) -> [f32; 3] {
 pub fn ok(msg: impl Into<String>) -> Out {
     Out::json(Value::String(msg.into()))
 }
+
+/// `null`, `""` or `false` -> `Some(None)` (remove); a value -> `Some(Some(v))`;
+/// absent -> `None` (unchanged, via `#[serde(default)]`).
+pub fn nullable<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> Result<Option<Option<T>>, D::Error> {
+    let v = <Value as Deserialize>::deserialize(d)?;
+    match v {
+        Value::Null | Value::Bool(false) => Ok(Some(None)),
+        Value::String(s) if s.is_empty() => Ok(Some(None)),
+        v => serde_json::from_value(v).map(|x| Some(Some(x))).map_err(serde::de::Error::custom),
+    }
+}
+

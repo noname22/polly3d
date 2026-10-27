@@ -181,6 +181,9 @@ fn describe_scene(ctx: &mut Ctx, _: Empty) -> Result<Out> {
     if !s.slots.is_empty() {
         j["slots"] = json!(s.slots.iter().map(|(k, v)| (k.clone(), json!({"active": v.active, "default": v.default, "variants": v.variants.iter().map(|x| x.name.clone()).collect::<Vec<_>>()}))).collect::<serde_json::Map<_, _>>());
     }
+    if !s.lighting.is_default() {
+        j["lighting"] = json!(s.lighting);
+    }
     if !s.palettes.is_empty() {
         j["palettes"] = json!(s.palettes.iter().map(|(k, v)| (k.clone(), v.len())).collect::<std::collections::BTreeMap<_, _>>());
     }

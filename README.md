@@ -146,6 +146,19 @@ extensions, and adds MikkTSpace tangents to normal-mapped meshes. Renders use
 Bevy's `StandardMaterial`, so every channel shows up in the agent's images and
 the viewer just as it will in the game.
 
+## Lighting and effects
+
+Lighting is a scene setting (`set_lighting`), saved with the project; a
+`render` can override it for one image. The default is polly's classic
+camera-relative key, fill and ambient lights with no effects, which suits
+modelling and retro assets. For modern assets:
+- `environment`: image-based lighting and reflections from a built-in `"studio"` or `"sky"`, or an equirectangular `.hdr` file; `show_environment` uses it as the background.
+- `sun`: a world-fixed directional light; `shadows` makes it and the key light cast shadows.
+- `ambient_occlusion` (screen-space), `tonemapping` (`agx`, `tony_mc_mapface`, `aces_fitted`, `reinhard`, `blender_filmic`), `exposure` in stops and `bloom`.
+
+These change the light and the camera, not the shading model: materials look
+the same as in Bevy under the same light. The viewer shows the scene's lighting.
+
 ## Reference images
 
 A reference image (a character sheet, a blueprint) is shown behind or over the

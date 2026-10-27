@@ -43,6 +43,7 @@ bevy = { version = "0.20.0", default-features = false, features = [
     "std", "multi_threaded", "async_executor",
     "bevy_asset", "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_mesh", "bevy_image",
     "bevy_camera", "bevy_light", "bevy_color", "bevy_shader", "bevy_material", "bevy_window",
-    "bevy_mikktspace",
+    "bevy_mikktspace", "bevy_post_process", "bevy_anti_alias",
+    "tonemapping_luts", "ktx2", "zstd_rust",
 ] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1535,3 +1535,38 @@ fn pbr_materials() {
     assert!(text(&uv).contains("\"C\""), "{}", text(&uv));
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn lighting_and_effects() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Box"}));
+    assert!(call(&s, "describe_scene", json!({})).get("lighting").is_none());
+    let l = call(&s, "set_lighting", json!({"environment": "studio", "tonemapping": "agx", "shadows": true, "ambient_occlusion": true, "bloom": 0.1}));
+    assert_eq!(l["view_lights_on"], false);
+    assert_eq!(l["lighting"]["tonemapping"], "agx");
+    call_err(&s, "set_lighting", json!({"environment": "/nope/missing.hdr"}));
+    call_err(&s, "set_lighting", json!({"environment": "moon"}));
+    call_err(&s, "set_lighting", json!({"view_lights": "sometimes"}));
+    let d = call(&s, "describe_scene", json!({}));
+    assert_eq!(d["lighting"]["environment"], "studio");
+    // Per-render override, then the scene's own settings.
+    let flat = s.call("render", json!({"view": "front", "overlays": {"grid": false, "wireframe": false}, "legend": false, "lighting": {"reset": true}}));
+    if flat.is_error != Some(true) {
+        let lit = s.call("render", json!({"view": "front", "overlays": {"grid": false, "wireframe": false}, "legend": false}));
+        assert_ne!(images(&flat)[0], images(&lit)[0], "scene lighting differs from the reset override");
+    }
+    // Saved with the project, undoable, and "auto" view lights.
+    let dir = std::env::temp_dir().join(format!("polly-light-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("l.polly");
+    call(&s, "save_project", json!({"path": path.to_str().unwrap()}));
+    call(&s, "set_lighting", json!({"view_lights": "auto", "environment": null}));
+    assert!(call(&s, "describe_scene", json!({}))["lighting"].get("environment").map_or(true, Value::is_null));
+    call(&s, "undo", json!({}));
+    assert_eq!(call(&s, "describe_scene", json!({}))["lighting"]["environment"], "studio");
+    call(&s, "set_lighting", json!({"reset": true}));
+    assert!(call(&s, "describe_scene", json!({})).get("lighting").is_none());
+    call(&s, "load_project", json!({"path": path.to_str().unwrap()}));
+    assert_eq!(call(&s, "describe_scene", json!({}))["lighting"]["bloom"].as_f64().unwrap(), 0.1f32 as f64);
+    std::fs::remove_dir_all(dir).ok();
+}

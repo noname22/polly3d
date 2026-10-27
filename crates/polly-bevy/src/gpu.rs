@@ -10,7 +10,13 @@ use bevy::app::{PanicHandlerPlugin, SubApps, TerminalCtrlCHandlerPlugin};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{ClearColorConfig, Exposure, RenderTarget};
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::anti_alias::fxaa::Fxaa;
+use bevy::camera::Hdr;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
+use bevy::light::{CascadeShadowConfigBuilder, EnvironmentMapLight, Skybox};
+use bevy::pbr::ScreenSpaceAmbientOcclusion;
+use bevy::post_process::bloom::Bloom;
+use polly_core::lighting::Tonemap;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::light::{AmbientLight, NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -27,6 +33,7 @@ use polly_core::scene::{Filter, Material as PMaterial, ObjectId, Scene, Texture}
 use polly_render::{Frame, RenderOptions};
 
 use crate::conv::{m4, v3};
+use crate::env;
 use crate::lines::{self, LineMaterial};
 use crate::projection::PollyProjection;
 
@@ -72,12 +79,21 @@ struct Cached<T> {
     last_used: u64,
 }
 
+/// Prefiltered cubemaps of one environment.
+#[derive(Clone)]
+pub struct EnvMaps {
+    diffuse: Handle<Image>,
+    specular: Handle<Image>,
+    skybox: Option<Handle<Image>>,
+}
+
 pub struct Gpu {
     apps: SubApps,
     pub adapter: String,
     job: u64,
-    camera: Entity,
-    lights: [Entity; 3],
+    /// Key, fill, sky (classic view lights) and sun.
+    lights: [Entity; 4],
+    environments: HashMap<String, EnvMaps>,
     targets: HashMap<[u32; 2], Handle<Image>>,
     objects: HashMap<u64, ObjectEntry>,
     materials: HashMap<u64, Cached<Handle<StandardMaterial>>>,
@@ -125,19 +141,18 @@ impl Gpu {
         let mut apps = std::mem::take(app.sub_apps_mut());
         let world = apps.main.world_mut();
         let adapter = world.get_resource::<RenderAdapterInfo>().map(|a| a.name.clone()).ok_or_else(|| anyhow::anyhow!("Bevy found no GPU adapter"))?;
-        let camera = world.spawn((Camera3d::default(), Camera { is_active: false, ..default() })).id();
         let light = |world: &mut World| {
             world.spawn((DirectionalLight { illuminance: 0.0, shadow_maps_enabled: false, ..default() }, Transform::default())).id()
         };
-        let lights = [light(world), light(world), light(world)];
+        let lights = [light(world), light(world), light(world), light(world)];
         let line_material = world.resource_mut::<Assets<LineMaterial>>().add(LineMaterial::default());
         let _ = &mut apps;
         Ok(Gpu {
             apps,
             adapter,
             job: 0,
-            camera,
             lights,
+            environments: HashMap::new(),
             targets: HashMap::new(),
             objects: HashMap::new(),
             materials: HashMap::new(),
@@ -155,6 +170,38 @@ impl Gpu {
             materials: self.materials.len(),
             images: self.images.len(),
         }
+    }
+
+    /// Cubemaps for an environment spec ("studio", "sky" or an .hdr path),
+    /// built once per spec (and file modification time).
+    fn environment(&mut self, spec: &str, skybox: bool) -> Result<EnvMaps> {
+        let stamp = std::fs::metadata(spec).and_then(|m| m.modified()).ok();
+        let key = format!("{spec}|{stamp:?}");
+        let missing = match self.environments.get(&key) {
+            None => true,
+            Some(e) => skybox && e.skybox.is_none(),
+        };
+        if missing {
+            let src = env::Source::load(spec)?;
+            let sky_img = skybox.then(|| env::skybox(&src));
+            let (d, sp) = (env::diffuse(&src), env::specular(&src));
+            if self.environments.len() >= 4 {
+                let old: Vec<EnvMaps> = self.environments.drain().map(|(_, v)| v).collect();
+                let images = &mut self.world().resource_mut::<Assets<Image>>();
+                for e in old {
+                    images.remove(&e.diffuse);
+                    images.remove(&e.specular);
+                    if let Some(s) = e.skybox {
+                        images.remove(&s);
+                    }
+                }
+            }
+            self.environments.remove(&key);
+            let images = &mut self.world().resource_mut::<Assets<Image>>();
+            let maps = EnvMaps { diffuse: images.add(d), specular: images.add(sp), skybox: sky_img.map(|i| images.add(i)) };
+            self.environments.insert(key.clone(), maps);
+        }
+        Ok(self.environments[&key].clone())
     }
 
     fn world(&mut self) -> &mut World {
@@ -223,18 +270,25 @@ impl Gpu {
             self.references(scene, frame, o);
         }
 
-        // ---- camera and lights ----
+        // ---- camera, lights and effects ----
         let (target, fresh) = self.target([w, h]);
+        let lighting = o.lighting.clone().unwrap_or_else(|| scene.lighting.clone());
+        let envs_before = self.environments.len();
+        let env = match &lighting.environment {
+            Some(spec) => Some(self.environment(spec, lighting.show_environment)?),
+            None => None,
+        };
+        // New cubemaps only reach the GPU after an update, like new targets.
+        let fresh = fresh || self.environments.len() != envs_before;
         let cam = frame.cam.clone();
+        let (near, far) = (cam.near, cam.far);
         let bg = o.background.unwrap_or(scene.background);
         let view = m4(cam.view_matrix());
         let cam_transform = Transform::from_matrix(view.inverse());
         let (key, fill) = frame.light_dirs();
-        let camera = self.camera;
         let lights = self.lights;
         let world = self.world();
-        let _ = camera;
-        let cam_entity = world.spawn((
+        let mut camera = world.spawn((
             Camera3d::default(),
             Camera {
                 is_active: true,
@@ -244,19 +298,70 @@ impl Gpu {
             RenderTarget::Image(target.clone().into()),
             Projection::custom(PollyProjection { cam }),
             cam_transform,
-            Tonemapping::None,
             DebandDither::Disabled,
-            Exposure { ev100: EV100_UNIT },
-            Msaa::Sample4,
-            AmbientLight { color: Color::WHITE, brightness: AMBIENT, affects_lightmapped_meshes: true },
-        )).id();
+            Exposure { ev100: EV100_UNIT - lighting.exposure },
+        ));
+        let view_lights = lighting.view_lights_on();
+        camera.insert(AmbientLight {
+            color: Color::WHITE,
+            brightness: if view_lights { AMBIENT } else { 0.0 },
+            affects_lightmapped_meshes: true,
+        });
+        camera.insert(match lighting.tonemapping {
+            Tonemap::None => Tonemapping::None,
+            Tonemap::Agx => Tonemapping::AgX,
+            Tonemap::TonyMcMapface => Tonemapping::TonyMcMapface,
+            Tonemap::AcesFitted => Tonemapping::AcesFitted,
+            Tonemap::Reinhard => Tonemapping::Reinhard,
+            Tonemap::BlenderFilmic => Tonemapping::BlenderFilmic,
+        });
+        if lighting.needs_hdr() {
+            camera.insert(Hdr);
+        }
+        if lighting.bloom > 0.0 {
+            camera.insert(Bloom { intensity: lighting.bloom, ..Bloom::NATURAL });
+        }
+        if lighting.ambient_occlusion {
+            // SSAO needs the depth/normal prepass, which doesn't support MSAA: use FXAA instead.
+            camera.insert((ScreenSpaceAmbientOcclusion::default(), Msaa::Off, Fxaa::default()));
+        } else {
+            camera.insert(Msaa::Sample4);
+        }
+        if let Some(env) = &env {
+            let rotation = Quat::from_rotation_y(lighting.environment_rotation.to_radians());
+            camera.insert(EnvironmentMapLight {
+                diffuse_map: env.diffuse.clone(),
+                specular_map: env.specular.clone(),
+                intensity: lighting.environment_intensity,
+                rotation,
+                affects_lightmapped_mesh_diffuse: true,
+            });
+            if let Some(sky) = &env.skybox {
+                camera.insert(Skybox { image: Some(sky.clone()), brightness: lighting.environment_intensity, rotation });
+            }
+        }
+        let cam_entity = camera.id();
         let pi = std::f32::consts::PI;
-        for (e, dir, lux) in [(lights[0], v3(key), KEY), (lights[1], v3(fill), FILL), (lights[2], Vec3::Y, SKY)] {
+        let shadows = |on: bool| {
+            on.then(|| CascadeShadowConfigBuilder { num_cascades: 1, minimum_distance: near, maximum_distance: far, first_cascade_far_bound: far, overlap_proportion: 0.2 }.build())
+        };
+        let sun = lighting.sun.map(|s| (Vec3::from_array(s.direction).normalize_or(Vec3::Y), s.intensity * KEY, Color::linear_rgb(s.color[0], s.color[1], s.color[2])));
+        let rig = [
+            (lights[0], v3(key), if view_lights { KEY } else { 0.0 }, Color::WHITE, lighting.shadows && view_lights),
+            (lights[1], v3(fill), if view_lights { FILL } else { 0.0 }, Color::WHITE, false),
+            (lights[2], Vec3::Y, if view_lights { SKY } else { 0.0 }, Color::WHITE, false),
+            (lights[3], sun.map_or(Vec3::Y, |s| s.0), sun.map_or(0.0, |s| s.1), sun.map_or(Color::WHITE, |s| s.2), lighting.shadows && sun.is_some()),
+        ];
+        for (e, dir, lux, color, cast) in rig {
             let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-            world.entity_mut(e).insert((
-                DirectionalLight { illuminance: lux * pi, shadow_maps_enabled: false, ..default() },
+            let mut ent = world.entity_mut(e);
+            ent.insert((
+                DirectionalLight { illuminance: lux * pi, color, shadow_maps_enabled: cast, ..default() },
                 Transform::IDENTITY.looking_to(-dir, up),
             ));
+            if let Some(c) = shadows(cast) {
+                ent.insert(c);
+            }
         }
 
         self.transient.push((cam_entity, None));

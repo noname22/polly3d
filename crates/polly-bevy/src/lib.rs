@@ -7,6 +7,7 @@
 //! `StandardMaterial` into an image target and reads it back.
 
 mod conv;
+mod env;
 mod gpu;
 mod lines;
 mod projection;

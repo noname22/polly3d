@@ -38,10 +38,12 @@ impl CameraProjection for PollyProjection {
         self.cam.far
     }
     fn get_frustum_corners(&self, z_near: f32, z_far: f32) -> [Vec3A; 8] {
-        // View-space corners at the given (positive) distances, in the order
-        // Bevy expects: near (bottom right, top right, top left, bottom left), then far.
+        // View-space corners at the given view depths (Bevy passes them as
+        // negative z), in the order Bevy expects: near (bottom right, top
+        // right, top left, bottom left), then far.
         let inv = self.matrix().inverse();
-        let corner = |x: f32, y: f32, d: f32| -> Vec3A {
+        let corner = |x: f32, y: f32, z: f32| -> Vec3A {
+            let d = z.abs();
             // A point on the ray through NDC (x, y), scaled to view depth d.
             let p = inv * Vec4::new(x, y, 0.5, 1.0);
             let p = p.truncate() / p.w;

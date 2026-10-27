@@ -3,6 +3,7 @@ pub mod common;
 pub mod edit;
 pub mod history;
 pub mod io;
+pub mod lighting;
 pub mod material;
 pub mod paint;
 pub mod query;
@@ -20,6 +21,7 @@ pub fn registry() -> Registry {
     tools.extend(scenes::tools());
     tools.extend(scene::tools());
     tools.extend(material::tools());
+    tools.extend(lighting::tools());
     tools.extend(query::tools());
     tools.extend(edit::tools());
     tools.extend(history::tools());

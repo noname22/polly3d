@@ -63,6 +63,11 @@ Materials
 - Data maps are linear, not colours: create_texture kind "normal" (flat (128,128,255) normal map) or kind "data" (metallic-roughness, occlusion); `material` + `slot` wires it in. Textures go up to 4096 px, but painting a large one copies it into undo. render_uv_layout `slot` shows a slot's texture.
 - Renders use the same PBR shading as Bevy (StandardMaterial), so what you see is what the game shows.
 
+Lighting
+- The default is polly's classic camera-relative studio lights, no effects: best for modelling and retro assets.
+- set_lighting changes the scene's lighting (saved, undoable): environment ("studio", "sky" or an .hdr path) for image-based lighting and reflections, sun {direction, intensity} with shadows, ambient_occlusion, tonemapping ("agx" for PBR), exposure (stops), bloom (glow around emissives). Lighting is not a style: there is one shading model.
+- render `lighting` tries settings for one image without changing the scene ({"reset": true} = classic).
+
 Rigging & animation (optional)
 - Rig: add_bone / add_bone_chain (head/tail points in object space), check with render overlays {"bones":true,"bone_names":true}.
 - Characters with separate parts or gear: put the skeleton on one object (an armature, e.g. an empty "Rig" from add_mesh with no faces), then bind_to_armature each mesh (body, hair, clothing). One pose and one set of clips then drive them all. Bone, pose and clip tools accept a bound mesh and act on its armature; weights stay per mesh.
