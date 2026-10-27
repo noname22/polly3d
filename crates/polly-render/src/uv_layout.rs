@@ -59,7 +59,7 @@ pub fn render_uv_layout(scene: &Scene, object: ObjectId, texture: Option<Texture
 
     let Some(obj) = scene.objects.get(&object) else { return img };
     let mesh = &obj.mesh;
-    let uses_tex = |m: u32| texture.is_some() && scene.materials.get(&m).and_then(|m| m.texture) == texture;
+    let uses_tex = |m: u32| texture.is_some_and(|t| scene.materials.get(&m).is_some_and(|m| m.textures().any(|(_, x)| x == t)));
     let any = mesh.faces.values().any(|f| uses_tex(f.material));
     let faces: Vec<_> = mesh.faces.iter().filter(|(_, f)| !any || uses_tex(f.material)).collect();
     let to_px = |uv: glam::Vec2| [uv.x * ow as f32, uv.y * oh as f32];

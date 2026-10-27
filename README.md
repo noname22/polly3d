@@ -124,6 +124,26 @@ hidden with `KHR_node_visibility`), hideable parts as separate nodes, and the
 slot table in `extras`. See [docs/gltf-extras.md](docs/gltf-extras.md) for the
 format and [docs/bevy.md](docs/bevy.md) for using it in Bevy.
 
+## Materials
+
+Materials follow glTF's metallic-roughness model. A retro asset uses only a
+base colour and a small nearest-filtered texture (optionally unlit); a modern
+one adds any of:
+- `metallic`, `roughness` and a `metallic_roughness_texture` (G = roughness, B = metallic);
+- a `normal_texture` (with `normal_scale`) and an `occlusion_texture` (with `occlusion_strength`);
+- `emissive` colour, `emissive_strength` and an `emissive_texture`;
+- `blend` (alpha blending; exclusive with `alpha_cutoff`), `double_sided`, `unlit`;
+- `clearcoat`, `anisotropy`, `transmission` (with `ior` and `thickness`) and `specular`.
+
+Textures are sRGB colour by default. Normal, metallic-roughness and occlusion
+maps are linear data: `create_texture` with `kind: "normal"` or `"data"` makes
+one (and `slot` wires it into a material), `import_texture` takes `linear`, and
+a texture placed in a data slot becomes linear. Textures can be up to 4096 px
+per side. Export writes every channel and the matching `KHR_materials_*`
+extensions, and adds MikkTSpace tangents to normal-mapped meshes. Renders show
+base colour and emissive for now; the full PBR view arrives with the Bevy
+renderer.
+
 ## Reference images
 
 A reference image (a character sheet, a blueprint) is shown behind or over the

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
 use polly_core::mesh::FaceId;
-use polly_core::scene::{Filter, Material, Scene, Texture, TextureId};
+use polly_core::scene::{Filter, Material, Scene, Slot, Texture, TextureId};
 use polly_paint::{Blend, Dither, Fill, GradientDir, Paint, Region, Rgba};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -16,7 +16,7 @@ pub fn tools() -> Vec<ToolDef> {
     vec![
         def(
             "create_texture",
-            "Create a texture (small sizes like 32/64/128 suit low-poly). Optionally lock it to a palette (every painted pixel snaps to it), and create a material using it, assigned to an object.",
+            "Create a texture (small sizes like 32/64/128 suit low-poly; up to 4096 for modern assets, but painting a large texture copies it into undo). kind: color (default, sRGB), normal (flat normal map, linear) or data (linear, e.g. metallic-roughness or occlusion). Optionally lock it to a palette (every painted pixel snaps to it), and put it into a material slot (created if needed), assigned to an object.",
             false,
             create_texture,
         ),
@@ -118,8 +118,12 @@ struct CreateTexture {
     palette: Option<String>,
     /// "nearest" (default, crisp pixels) or "linear".
     filter: Option<Filter>,
+    /// "color" (default: sRGB colours), "normal" (filled with the flat normal (128,128,255), linear) or "data" (linear values: metallic-roughness, occlusion).
+    kind: Option<String>,
     /// Create (or update) a material with this name using the texture.
     material: Option<String>,
+    /// Material slot for the texture: base (default for color), normal (default for kind normal), metallic_roughness, occlusion, emissive.
+    slot: Option<String>,
     /// Assign that material to all faces of this object.
     object: Option<String>,
 }
@@ -129,8 +133,29 @@ fn s64() -> u32 {
 }
 
 fn create_texture(ctx: &mut Ctx, a: CreateTexture) -> Result<Out> {
-    if !(1..=2048).contains(&a.width) || !(1..=2048).contains(&a.height) {
-        bail!("texture size must be 1..2048");
+    let max = polly_core::scene::MAX_TEXTURE_SIZE;
+    if !(1..=max).contains(&a.width) || !(1..=max).contains(&a.height) {
+        bail!("texture size must be 1..{max}");
+    }
+    let kind = a.kind.as_deref().unwrap_or("color");
+    let (linear, default_fill, default_slot) = match kind {
+        "color" | "colour" => (false, [255; 4], Slot::Base),
+        "normal" => (true, [128, 128, 255, 255], Slot::Normal),
+        "data" => (true, [255; 4], Slot::MetallicRoughness),
+        k => bail!("unknown kind '{k}' (color, normal, data)"),
+    };
+    let slot = match a.slot.as_deref() {
+        None => default_slot,
+        Some(n) => Slot::parse(n).with_context(|| format!("unknown slot '{n}' (base, normal, metallic_roughness, occlusion, emissive)"))?,
+    };
+    if slot.is_linear() != linear && a.material.is_some() {
+        bail!(
+            "slot {} holds {} but kind '{kind}' is {}; use kind {}",
+            slot.name(),
+            if slot.is_linear() { "linear data" } else { "colours" },
+            if linear { "linear data" } else { "a colour texture" },
+            if slot.is_linear() { if slot == Slot::Normal { "normal" } else { "data" } } else { "color" }
+        );
     }
     if let Some(p) = &a.palette {
         palette_named(&ctx.doc.scene, p).with_context(|| format!("unknown palette '{p}' (see list_palettes)"))?;
@@ -140,9 +165,11 @@ fn create_texture(ctx: &mut Ctx, a: CreateTexture) -> Result<Out> {
     }
     let obj = a.object.as_ref().map(|o| ctx.doc.scene.resolve(Some(o))).transpose()?;
     let (tid, mid) = edit_scene(ctx, "create texture", |s| {
-        let mut t = Texture::new(&a.name, a.width, a.height, a.fill.unwrap_or([255; 4]));
+        let mut t = Texture::new(&a.name, a.width, a.height, a.fill.unwrap_or(default_fill));
         t.palette = a.palette.clone();
-        t.filter = a.filter.unwrap_or_default();
+        t.linear = linear;
+        // Data maps are smooth signals: sample them linearly unless asked otherwise.
+        t.filter = a.filter.unwrap_or(if linear { Filter::Linear } else { Filter::Nearest });
         let tid = s.add_texture(t);
         let mut mid = None;
         if let Some(mname) = &a.material {
@@ -150,7 +177,11 @@ fn create_texture(ctx: &mut Ctx, a: CreateTexture) -> Result<Out> {
                 Ok(id) => id,
                 Err(_) => s.add_material(Material::new(mname, [1.0; 4])),
             };
-            s.materials.get_mut(&id).unwrap().texture = Some(tid);
+            let m = s.materials.get_mut(&id).unwrap();
+            *m.slot_mut(slot) = Some(tid);
+            if slot == Slot::Emissive && m.emissive == [0.0; 3] {
+                m.emissive = [1.0; 3];
+            }
             mid = Some(id);
         }
         if let (Some(o), Some(m)) = (obj, mid) {
@@ -162,8 +193,11 @@ fn create_texture(ctx: &mut Ctx, a: CreateTexture) -> Result<Out> {
         Ok((tid, mid))
     })?;
     let mut j = json!({"texture": a.name, "id": format!("t{tid}"), "size": [a.width, a.height]});
+    if linear {
+        j["linear"] = json!(true);
+    }
     if let Some(m) = mid {
-        j["material"] = json!({"name": a.material, "index": m});
+        j["material"] = json!({"name": a.material, "index": m, "slot": slot.name()});
     }
     if obj.is_some() {
         j["note"] = json!("material assigned to all faces; unwrap UVs before painting");
@@ -199,10 +233,12 @@ fn update_texture(ctx: &mut Ctx, a: UpdateTexture) -> Result<Out> {
             t.palette = (!p.is_empty()).then(|| p.clone());
         }
         if let Some([w, h]) = a.resize {
-            let mut r = polly_paint::resize_nearest(t, w.clamp(1, 2048), h.clamp(1, 2048));
+            let max = polly_core::scene::MAX_TEXTURE_SIZE;
+            let mut r = polly_paint::resize_nearest(t, w.clamp(1, max), h.clamp(1, max));
             r.name = t.name.clone();
             r.filter = t.filter;
             r.palette = t.palette.clone();
+            r.linear = t.linear;
             *t = r;
         }
         Ok(())
@@ -564,6 +600,9 @@ struct Import {
     path: String,
     name: Option<String>,
     palette: Option<String>,
+    /// The image holds linear data (normal, metallic-roughness or occlusion map), not sRGB colours.
+    #[serde(default)]
+    linear: bool,
 }
 
 fn import_texture(ctx: &mut Ctx, a: Import) -> Result<Out> {
@@ -572,7 +611,12 @@ fn import_texture(ctx: &mut Ctx, a: Import) -> Result<Out> {
         std::path::Path::new(&a.path).file_stem().map_or("texture".into(), |s| s.to_string_lossy().into_owned())
     });
     let mut t = polly_paint::from_png(&name, &bytes)?;
+    let max = polly_core::scene::MAX_TEXTURE_SIZE;
+    if t.width > max || t.height > max {
+        bail!("image is {}x{}; textures are limited to {max} px per side", t.width, t.height);
+    }
     t.palette = a.palette.clone();
+    t.linear = a.linear;
     let (w, h) = (t.width, t.height);
     let tid = edit_scene(ctx, "import texture", |s| Ok(s.add_texture(t)))?;
     Ok(Out::json(json!({"texture": name, "id": format!("t{tid}"), "size": [w, h]})))
@@ -597,7 +641,7 @@ pub fn faces_with_texture(scene: &Scene, obj: u32, tid: TextureId) -> BTreeSet<F
     o.mesh
         .faces
         .iter()
-        .filter(|(_, f)| scene.materials.get(&f.material).and_then(|m| m.texture) == Some(tid))
+        .filter(|(_, f)| scene.materials.get(&f.material).is_some_and(|m| m.textures().any(|(_, t)| t == tid)))
         .map(|(id, _)| *id)
         .collect()
 }

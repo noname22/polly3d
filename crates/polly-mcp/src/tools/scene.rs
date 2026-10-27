@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use polly_core::glam::{Mat4, Vec3};
 use polly_core::mesh::Mesh;
 use polly_core::primitives::Primitive;
-use polly_core::scene::{Material, Scene, quat_from_euler_degrees};
+use polly_core::scene::{Scene, quat_from_euler_degrees};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -94,14 +94,6 @@ pub fn tools() -> Vec<ToolDef> {
             false,
             separate,
         ),
-        def(
-            "create_material",
-            "Create a material. Faces use material 0 (\"default\") until assigned.",
-            false,
-            create_material,
-        ),
-        def("update_material", "Change properties of an existing material.", false, update_material),
-        def("assign_material", "Assign a material to faces of an object.", false, assign_material),
         def("set_background", "Set the render background color (hex).", false, set_background),
     ]
 }
@@ -164,21 +156,17 @@ pub fn object_summary(scene: &Scene, id: u32) -> serde_json::Value {
 fn describe_scene(ctx: &mut Ctx, _: Empty) -> Result<Out> {
     let s = &ctx.doc.scene;
     let objects: Vec<_> = s.objects.keys().map(|id| object_summary(s, *id)).collect();
-    let materials: Vec<_> = s
-        .materials
-        .iter()
-        .map(|(id, m)| {
-            json!({
-                "index": id, "name": m.name, "color": polly_hex(m.base_color),
-                "texture": m.texture.and_then(|t| s.textures.get(&t)).map(|t| t.name.clone()),
-                "unlit": m.unlit, "alpha_cutoff": m.alpha_cutoff, "double_sided": m.double_sided,
-            })
-        })
-        .collect();
+    let materials: Vec<_> = s.materials.keys().map(|id| super::material::material_json(s, *id)).collect();
     let textures: Vec<_> = s
         .textures
         .iter()
-        .map(|(id, t)| json!({"id": format!("t{id}"), "name": t.name, "size": [t.width, t.height], "filter": t.filter, "palette": t.palette}))
+        .map(|(id, t)| {
+            let mut j = json!({"id": format!("t{id}"), "name": t.name, "size": [t.width, t.height], "filter": t.filter, "palette": t.palette});
+            if t.linear {
+                j["linear"] = json!(true);
+            }
+            j
+        })
         .collect();
     let mut j = json!({
         "scene": ctx.scene,
@@ -654,104 +642,6 @@ fn separate(ctx: &mut Ctx, a: Separate) -> Result<Out> {
         Ok(nid)
     })?;
     Ok(Out::json(json!({"new_object": object_summary(&ctx.doc.scene, new_id), "from": object_summary(&ctx.doc.scene, id)})))
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct CreateMaterial {
-    name: String,
-    /// Base color (default white, so textures show unmodified).
-    color: Option<[u8; 4]>,
-    /// Texture name or id to use as base color map.
-    texture: Option<String>,
-    #[serde(default)]
-    unlit: bool,
-    /// Discard pixels with alpha below this (cutout transparency, e.g. 0.5 for foliage).
-    alpha_cutoff: Option<f32>,
-    #[serde(default)]
-    double_sided: bool,
-}
-
-fn create_material(ctx: &mut Ctx, a: CreateMaterial) -> Result<Out> {
-    let color = a.color.map(to_f32).unwrap_or([1.0; 4]);
-    let tex = a.texture.as_deref().map(|t| ctx.doc.scene.resolve_texture(t)).transpose()?;
-    if ctx.doc.scene.materials.values().any(|m| m.name == a.name) {
-        bail!("material '{}' already exists (use update_material)", a.name);
-    }
-    let id = edit_scene(ctx, "create material", |s| {
-        let mut m = Material::new(&a.name, color);
-        m.texture = tex;
-        m.unlit = a.unlit;
-        m.alpha_cutoff = a.alpha_cutoff;
-        m.double_sided = a.double_sided;
-        Ok(s.add_material(m))
-    })?;
-    Ok(Out::json(json!({"material": a.name, "index": id})))
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct UpdateMaterial {
-    /// Material name or index.
-    material: String,
-    name: Option<String>,
-    color: Option<[u8; 4]>,
-    /// Texture name/id; empty string removes the texture.
-    texture: Option<String>,
-    unlit: Option<bool>,
-    /// Negative value removes cutout.
-    alpha_cutoff: Option<f32>,
-    double_sided: Option<bool>,
-}
-
-fn update_material(ctx: &mut Ctx, a: UpdateMaterial) -> Result<Out> {
-    let id = ctx.doc.scene.resolve_material(&a.material)?;
-    let color = a.color.map(to_f32);
-    let tex = match a.texture.as_deref() {
-        None => None,
-        Some("") => Some(None),
-        Some(t) => Some(Some(ctx.doc.scene.resolve_texture(t)?)),
-    };
-    edit_scene(ctx, "update material", |s| {
-        let m = s.materials.get_mut(&id).unwrap();
-        if let Some(n) = &a.name {
-            m.name = n.clone();
-        }
-        if let Some(c) = color {
-            m.base_color = c;
-        }
-        if let Some(t) = tex {
-            m.texture = t;
-        }
-        if let Some(u) = a.unlit {
-            m.unlit = u;
-        }
-        if let Some(c) = a.alpha_cutoff {
-            m.alpha_cutoff = (c >= 0.0).then_some(c);
-        }
-        if let Some(d) = a.double_sided {
-            m.double_sided = d;
-        }
-        Ok(())
-    })?;
-    Ok(ok("material updated"))
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct AssignMaterial {
-    object: Option<String>,
-    /// Faces (default: current selection; "all" for every face).
-    elements: Option<Vec<String>>,
-    /// Material name or index.
-    material: String,
-}
-
-fn assign_material(ctx: &mut Ctx, a: AssignMaterial) -> Result<Out> {
-    let mid = ctx.doc.scene.resolve_material(&a.material)?;
-    edit_mesh(ctx, &a.object, Some(&a.elements), "assign material", |m, sel| {
-        for f in sel.implied_faces(m) {
-            m.faces.get_mut(&f).unwrap().material = mid;
-        }
-        Ok(Default::default())
-    })
 }
 
 #[derive(Deserialize, JsonSchema)]

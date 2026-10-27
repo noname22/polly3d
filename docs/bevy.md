@@ -15,6 +15,17 @@ file layout and metadata, see [gltf-extras.md](gltf-extras.md).
 - **Skins and animation:** skins are supported, so one skeleton drives the body and its skinned gear, and gear attached to bones follows them. Clips load as `AnimationClip`s, named after the clip.
 - **Visibility:** Bevy 0.20 does **not** support `KHR_node_visibility`, so all variants are visible after loading until you hide them. Its own supported-extensions table lists it as ❌.
 
+## Materials
+
+Polly's materials are glTF metallic-roughness materials, so Bevy's glTF loader
+turns each into a `StandardMaterial` with nothing extra to do:
+- base colour, metallic and roughness factors and the metallic-roughness texture;
+- normal map (Polly writes MikkTSpace `TANGENT`s, so Bevy uses them instead of generating its own), occlusion map, emissive colour/texture and `KHR_materials_emissive_strength`;
+- `alphaMode` (`MASK` for `alpha_cutoff`, `BLEND` for `blend`), double-sidedness and `KHR_materials_unlit`;
+- `KHR_materials_clearcoat`, `_anisotropy`, `_transmission`, `_ior`, `_volume` and `_specular`. Some of these are behind Bevy cargo features (`pbr_multi_layer_material_textures`, `pbr_anisotropy_texture`, `pbr_transmission_textures`, `pbr_specular_textures`) when they use textures; Polly writes only factors for them.
+
+Nearest-filtered textures carry a nearest sampler, which Bevy honours.
+
 ## Loading and hiding the alternatives
 
 Spawn the scene and observe `WorldInstanceReady`. The instance is complete at

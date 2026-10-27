@@ -8,7 +8,9 @@ polly-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 image.workspace = true
+bevy_mikktspace = "1.0.0"
 anyhow.workspace = true
 
 [dev-dependencies]
 gltf.workspace = true
+serde_json.workspace = true

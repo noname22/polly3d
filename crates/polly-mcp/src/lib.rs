@@ -58,6 +58,11 @@ Workflow that works well
    - Finish with bake_shading (ao and/or height) for depth; use dither on palette-locked textures. occluders "scene" uses the default gear loadout; shadows of swappable gear stay in the texture when it is swapped, so bake those textures with occluders that are always present.
 6. save_project, export_glb.
 
+Materials
+- Retro: color + a small nearest-filtered texture (+ unlit). Modern PBR (exported as glTF metallic-roughness, read by Bevy, Godot, Blender): metallic, roughness, normal_texture (+ normal_scale), occlusion_texture, metallic_roughness_texture (G = roughness, B = metallic; may be the same texture as occlusion), emissive + emissive_strength (+ emissive_texture), blend (soft transparency; not with alpha_cutoff), and clearcoat / anisotropy / transmission / specular objects. update_material changes only given fields; "" or null removes one.
+- Data maps are linear, not colours: create_texture kind "normal" (flat (128,128,255) normal map) or kind "data" (metallic-roughness, occlusion); `material` + `slot` wires it in. Textures go up to 4096 px, but painting a large one copies it into undo. render_uv_layout `slot` shows a slot's texture.
+- Renders show base colour and emissive only for now (a note says so); the exported file carries every channel.
+
 Rigging & animation (optional)
 - Rig: add_bone / add_bone_chain (head/tail points in object space), check with render overlays {"bones":true,"bone_names":true}.
 - Characters with separate parts or gear: put the skeleton on one object (an armature, e.g. an empty "Rig" from add_mesh with no faces), then bind_to_armature each mesh (body, hair, clothing). One pose and one set of clips then drive them all. Bone, pose and clip tools accept a bound mesh and act on its armature; weights stay per mesh.

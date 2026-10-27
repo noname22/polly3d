@@ -12,6 +12,9 @@ pub type ObjectId = u32;
 pub type MaterialId = u32;
 pub type TextureId = u32;
 
+/// Largest texture side length (painting a big texture copies it into undo).
+pub const MAX_TEXTURE_SIZE: u32 = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Transform {
     pub translation: Vec3,
@@ -104,12 +107,15 @@ pub struct Texture {
     /// Name of the palette painting is locked to, if any.
     #[serde(default)]
     pub palette: Option<String>,
+    /// Holds linear data (normal, metallic-roughness, occlusion maps), not sRGB colour.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linear: bool,
 }
 
 impl Texture {
     pub fn new(name: impl Into<String>, width: u32, height: u32, fill: [u8; 4]) -> Self {
         let pixels = fill.iter().copied().cycle().take((width * height * 4) as usize).collect();
-        Texture { name: name.into(), width, height, pixels: Arc::new(pixels), filter: Filter::Nearest, palette: None }
+        Texture { name: name.into(), width, height, pixels: Arc::new(pixels), filter: Filter::Nearest, palette: None, linear: false }
     }
     pub fn get(&self, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * self.width + x) * 4) as usize;
@@ -133,10 +139,102 @@ pub(crate) mod b64 {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Which material slot a texture is used in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Slot {
+    /// Base colour (sRGB).
+    Base,
+    /// glTF metallic-roughness packing: G = roughness, B = metallic (linear).
+    MetallicRoughness,
+    /// Tangent-space normal map (linear).
+    Normal,
+    /// Ambient occlusion in R (linear).
+    Occlusion,
+    /// Emissive colour (sRGB).
+    Emissive,
+}
+
+impl Slot {
+    pub const ALL: [Slot; 5] = [Slot::Base, Slot::MetallicRoughness, Slot::Normal, Slot::Occlusion, Slot::Emissive];
+    /// Data slots hold linear values, not colours.
+    pub fn is_linear(self) -> bool {
+        matches!(self, Slot::MetallicRoughness | Slot::Normal | Slot::Occlusion)
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Slot::Base => "base",
+            Slot::MetallicRoughness => "metallic_roughness",
+            Slot::Normal => "normal",
+            Slot::Occlusion => "occlusion",
+            Slot::Emissive => "emissive",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Slot> {
+        Slot::ALL.into_iter().find(|x| x.name() == s).or(match s {
+            "base_color" | "color" | "albedo" => Some(Slot::Base),
+            "metallic" | "roughness" | "mr" => Some(Slot::MetallicRoughness),
+            "ao" => Some(Slot::Occlusion),
+            _ => None,
+        })
+    }
+}
+
+/// `KHR_materials_clearcoat`: a thin clear layer (car paint, lacquer, wet skin).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Clearcoat {
+    #[serde(default = "one")]
+    pub factor: f32,
+    #[serde(default)]
+    pub roughness: f32,
+}
+
+/// `KHR_materials_anisotropy`: stretched highlights (brushed metal, hair).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Anisotropy {
+    #[serde(default = "one")]
+    pub strength: f32,
+    /// Radians, counter-clockwise from the tangent direction.
+    #[serde(default)]
+    pub rotation: f32,
+}
+
+/// `KHR_materials_transmission` (+ `_ior`, `_volume` thickness): glass, thin plastic.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Transmission {
+    #[serde(default = "one")]
+    pub factor: f32,
+    #[serde(default = "default_ior")]
+    pub ior: f32,
+    #[serde(default)]
+    pub thickness: f32,
+}
+
+/// `KHR_materials_specular`: specular strength and tint for dielectrics.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Specular {
+    #[serde(default = "one")]
+    pub factor: f32,
+    /// Linear RGB tint.
+    #[serde(default = "white3")]
+    pub color: [f32; 3],
+}
+
+fn one() -> f32 {
+    1.0
+}
+fn default_ior() -> f32 {
+    1.5
+}
+fn white3() -> [f32; 3] {
+    [1.0; 3]
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Material {
     pub name: String,
     pub base_color: [f32; 4],
+    /// Base colour map (sRGB).
     #[serde(default)]
     pub texture: Option<TextureId>,
     /// Ignore lighting (flat, fullbright).
@@ -147,11 +245,117 @@ pub struct Material {
     pub alpha_cutoff: Option<f32>,
     #[serde(default)]
     pub double_sided: bool,
+    #[serde(default)]
+    pub metallic: f32,
+    #[serde(default = "one")]
+    pub roughness: f32,
+    /// glTF packing: G = roughness, B = metallic (multiplied with the factors).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metallic_roughness_texture: Option<TextureId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_texture: Option<TextureId>,
+    #[serde(default = "one")]
+    pub normal_scale: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occlusion_texture: Option<TextureId>,
+    #[serde(default = "one")]
+    pub occlusion_strength: f32,
+    /// Linear RGB.
+    #[serde(default)]
+    pub emissive: [f32; 3],
+    #[serde(default = "one")]
+    pub emissive_strength: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emissive_texture: Option<TextureId>,
+    /// Alpha blending (exclusive with `alpha_cutoff`).
+    #[serde(default)]
+    pub blend: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearcoat: Option<Clearcoat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anisotropy: Option<Anisotropy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transmission: Option<Transmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specular: Option<Specular>,
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Material {
+            name: String::new(),
+            base_color: [1.0; 4],
+            texture: None,
+            unlit: false,
+            alpha_cutoff: None,
+            double_sided: false,
+            metallic: 0.0,
+            roughness: 1.0,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            occlusion_texture: None,
+            occlusion_strength: 1.0,
+            emissive: [0.0; 3],
+            emissive_strength: 1.0,
+            emissive_texture: None,
+            blend: false,
+            clearcoat: None,
+            anisotropy: None,
+            transmission: None,
+            specular: None,
+        }
+    }
 }
 
 impl Material {
     pub fn new(name: impl Into<String>, base_color: [f32; 4]) -> Self {
-        Material { name: name.into(), base_color, texture: None, unlit: false, alpha_cutoff: None, double_sided: false }
+        Material { name: name.into(), base_color, ..Default::default() }
+    }
+
+    /// Every texture the material uses, with its slot.
+    pub fn textures(&self) -> impl Iterator<Item = (Slot, TextureId)> + '_ {
+        Slot::ALL.into_iter().filter_map(|s| self.slot(s).map(|t| (s, t)))
+    }
+
+    pub fn slot(&self, s: Slot) -> Option<TextureId> {
+        match s {
+            Slot::Base => self.texture,
+            Slot::MetallicRoughness => self.metallic_roughness_texture,
+            Slot::Normal => self.normal_texture,
+            Slot::Occlusion => self.occlusion_texture,
+            Slot::Emissive => self.emissive_texture,
+        }
+    }
+
+    pub fn slot_mut(&mut self, s: Slot) -> &mut Option<TextureId> {
+        match s {
+            Slot::Base => &mut self.texture,
+            Slot::MetallicRoughness => &mut self.metallic_roughness_texture,
+            Slot::Normal => &mut self.normal_texture,
+            Slot::Occlusion => &mut self.occlusion_texture,
+            Slot::Emissive => &mut self.emissive_texture,
+        }
+    }
+
+    /// Emissive colour times strength is non-zero.
+    pub fn is_emissive(&self) -> bool {
+        self.emissive_strength > 0.0 && self.emissive.iter().any(|c| *c > 0.0)
+    }
+
+    /// Uses channels beyond base colour, emissive and alpha (PBR shading data).
+    pub fn has_pbr_channels(&self) -> bool {
+        let d = Material::default();
+        self.metallic != d.metallic
+            || self.roughness != d.roughness
+            || self.metallic_roughness_texture.is_some()
+            || self.normal_texture.is_some()
+            || self.occlusion_texture.is_some()
+            || self.blend
+            || self.clearcoat.is_some()
+            || self.anisotropy.is_some()
+            || self.transmission.is_some()
+            || self.specular.is_some()
     }
 }
 
@@ -430,5 +634,52 @@ impl Scene {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_material_round_trips() {
+        let m = Material {
+            name: "paint".into(),
+            base_color: [0.5, 0.2, 0.1, 1.0],
+            texture: Some(1),
+            metallic: 0.3,
+            roughness: 0.4,
+            metallic_roughness_texture: Some(2),
+            normal_texture: Some(3),
+            normal_scale: 0.7,
+            occlusion_texture: Some(2),
+            occlusion_strength: 0.5,
+            emissive: [1.0, 0.5, 0.0],
+            emissive_strength: 3.0,
+            emissive_texture: Some(4),
+            blend: true,
+            clearcoat: Some(Clearcoat { factor: 1.0, roughness: 0.1 }),
+            anisotropy: Some(Anisotropy { strength: 0.6, rotation: 0.5 }),
+            transmission: Some(Transmission { factor: 0.9, ior: 1.45, thickness: 0.02 }),
+            specular: Some(Specular { factor: 0.8, color: [1.0, 0.9, 0.8] }),
+            ..Material::new("x", [1.0; 4])
+        };
+        let j = serde_json::to_string(&m).unwrap();
+        let back: Material = serde_json::from_str(&j).unwrap();
+        assert_eq!(m, back);
+        let slots: Vec<_> = back.textures().collect();
+        assert_eq!(slots.len(), 5);
+        assert!(back.has_pbr_channels());
+    }
+
+    #[test]
+    fn old_material_json_gets_defaults() {
+        let old = r#"{"name":"m","base_color":[1,0,0,1],"texture":2,"unlit":false,"alpha_cutoff":null,"double_sided":true}"#;
+        let m: Material = serde_json::from_str(old).unwrap();
+        assert_eq!(m, Material { texture: Some(2), double_sided: true, ..Material::new("m", [1.0, 0.0, 0.0, 1.0]) });
+        assert_eq!((m.metallic, m.roughness, m.normal_scale, m.occlusion_strength, m.emissive_strength), (0.0, 1.0, 1.0, 1.0, 1.0));
+        assert!(!m.has_pbr_channels());
+        let t: Texture = serde_json::from_str(r#"{"name":"t","width":1,"height":1,"pixels":"AAAAAA=="}"#).unwrap();
+        assert!(!t.linear);
     }
 }

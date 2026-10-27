@@ -40,11 +40,16 @@ struct Globals {
     viewport: [f32; 4],
 }
 
+/// Note added to renders of materials using channels this renderer ignores.
+pub const PBR_NOTE: &str = "PBR channels not shown until the Bevy renderer lands (metallic/roughness, normal and occlusion maps, blending, clearcoat etc.; base colour and emissive are shown)";
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct MaterialUniform {
     base: [f32; 4],
     params: [f32; 4],
+    /// rgb = emissive colour x strength (linear), w = 1 when an emissive texture is bound.
+    emissive: [f32; 4],
 }
 
 pub(crate) struct Setup {
@@ -186,6 +191,7 @@ struct RefVertex {
 struct GpuTexture {
     w: u32,
     h: u32,
+    linear: bool,
     hash: u64,
     tex: wgpu::Texture,
     view: wgpu::TextureView,
@@ -329,6 +335,16 @@ impl Renderer {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -589,7 +605,7 @@ impl Renderer {
         t.pixels.hash(&mut h);
         let hash = h.finish();
         let ext = wgpu::Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 };
-        let needs_new = self.textures.get(&id).is_none_or(|g| g.w != t.width || g.h != t.height);
+        let needs_new = self.textures.get(&id).is_none_or(|g| g.w != t.width || g.h != t.height || g.linear != t.linear);
         if needs_new {
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("scene texture"),
@@ -597,12 +613,12 @@ impl Renderer {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format: if t.linear { wgpu::TextureFormat::Rgba8Unorm } else { wgpu::TextureFormat::Rgba8UnormSrgb },
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
             let view = tex.create_view(&Default::default());
-            self.textures.insert(id, GpuTexture { w: t.width, h: t.height, hash: hash.wrapping_add(1), tex: tex, view });
+            self.textures.insert(id, GpuTexture { w: t.width, h: t.height, linear: t.linear, hash: hash.wrapping_add(1), tex, view });
         }
         let g = self.textures.get_mut(&id).unwrap();
         if g.hash != hash {
@@ -648,7 +664,7 @@ impl Renderer {
                 ext,
             );
             let view = tex.create_view(&Default::default());
-            self.references.insert(r.name.clone(), (key, GpuTexture { w: r.width, h: r.height, hash: 0, tex, view }));
+            self.references.insert(r.name.clone(), (key, GpuTexture { w: r.width, h: r.height, linear: false, hash: 0, tex, view }));
         }
         Some(self.references[&r.name].1.view.clone())
     }
@@ -752,14 +768,21 @@ impl Renderer {
                 },
                 None => (self.white.clone(), Filter::Nearest),
             };
+            let eview = mat.emissive_texture.and_then(|tid| self.texture_view(scene, tid, &mut notes));
             let sampler = match o.filter.unwrap_or(filt) {
                 Filter::Nearest => &self.sampler_nearest,
                 Filter::Linear => &self.sampler_linear,
             };
+            if mat.has_pbr_channels() && !notes.iter().any(|n| n == PBR_NOTE) {
+                notes.push(PBR_NOTE.into());
+            }
+            let e = mat.emissive.map(|c| c * mat.emissive_strength.max(0.0));
             let mu = MaterialUniform {
                 base: mat.base_color,
                 params: [if mat.unlit { 1.0 } else { 0.0 }, mat.alpha_cutoff.unwrap_or(-1.0), 0.0, 0.0],
+                emissive: [e[0], e[1], e[2], if eview.is_some() { 1.0 } else { 0.0 }],
             };
+            let eview = eview.unwrap_or_else(|| self.white.clone());
             let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("material"),
                 contents: bytemuck::bytes_of(&mu),
@@ -772,6 +795,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&tview) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&eview) },
                 ],
             });
             let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -799,7 +823,7 @@ impl Renderer {
                 let verts: Vec<RefVertex> =
                     [0, 1, 2, 0, 2, 3].iter().map(|&i| RefVertex { pos: q[i].0.to_array(), uv: q[i].1 }).collect();
                 let opacity = o.reference_opacity.unwrap_or(rf.opacity).clamp(0.0, 1.0);
-                let mu = MaterialUniform { base: [1.0, 1.0, 1.0, opacity], params: [0.0; 4] };
+                let mu = MaterialUniform { base: [1.0, 1.0, 1.0, opacity], params: [0.0; 4], emissive: [0.0; 4] };
                 let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("reference"),
                     contents: bytemuck::bytes_of(&mu),
@@ -812,6 +836,7 @@ impl Renderer {
                         wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&tview) },
                         wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler_clamp) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.white) },
                     ],
                 });
                 let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

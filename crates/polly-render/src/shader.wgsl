@@ -17,11 +17,14 @@ struct Material {
     base: vec4<f32>,
     // x = unlit, y = alpha cutoff (< 0: none)
     params: vec4<f32>,
+    // rgb = emissive (linear, times strength), w = 1: multiply by emissive_tex
+    emissive: vec4<f32>,
 };
 
 @group(1) @binding(0) var<uniform> mat: Material;
 @group(1) @binding(1) var tex: texture_2d<f32>;
 @group(1) @binding(2) var samp: sampler;
+@group(1) @binding(3) var emissive_tex: texture_2d<f32>;
 
 fn to_srgb(c: vec3<f32>) -> vec3<f32> {
     let lo = c * 12.92;
@@ -89,6 +92,12 @@ fn fs_mesh(i: MeshOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32
         let rim = pow(1.0 - max(dot(n, v), 0.0), 3.0) * 0.2;
         rgb = rgb * (hemi + key + fill + rim);
     }
+    var glow = mat.emissive.rgb;
+    let et = textureSample(emissive_tex, samp, i.uv);
+    if (mat.emissive.w > 0.5) {
+        glow = glow * et.rgb;
+    }
+    rgb = rgb + glow;
     if (i.sel > 0.5) {
         rgb = mix(rgb, vec3<f32>(1.0, 0.33, 0.02), 0.5);
     }

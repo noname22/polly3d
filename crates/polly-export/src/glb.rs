@@ -111,6 +111,8 @@ struct Prim {
     col: Vec<f32>,
     joints: Vec<u16>,
     weights: Vec<f32>,
+    /// MikkTSpace tangents (xyz + handedness), only for normal-mapped materials.
+    tangent: Vec<f32>,
     /// Source vertex of each output vertex (for morph deltas).
     vids: Vec<VertId>,
     idx: Vec<u32>,
@@ -143,6 +145,137 @@ impl Prim {
         self.dedup.insert(key, i);
         i
     }
+}
+
+/// MikkTSpace view of a primitive's triangle list (one tangent per corner).
+struct MikkPrim<'a> {
+    p: &'a Prim,
+    out: Vec<[f32; 4]>,
+}
+
+impl bevy_mikktspace::Geometry for MikkPrim<'_> {
+    fn num_faces(&self) -> usize {
+        self.p.idx.len() / 3
+    }
+    fn num_vertices_of_face(&self, _face: usize) -> usize {
+        3
+    }
+    fn position(&self, face: usize, vert: usize) -> [f32; 3] {
+        let i = self.p.idx[face * 3 + vert] as usize * 3;
+        self.p.pos[i..i + 3].try_into().unwrap()
+    }
+    fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
+        let i = self.p.idx[face * 3 + vert] as usize * 3;
+        self.p.nrm[i..i + 3].try_into().unwrap()
+    }
+    fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
+        let i = self.p.idx[face * 3 + vert] as usize * 2;
+        self.p.uv[i..i + 2].try_into().unwrap()
+    }
+    fn set_tangent(&mut self, ts: Option<bevy_mikktspace::TangentSpace>, face: usize, vert: usize) {
+        self.out[face * 3 + vert] = ts.map_or([1.0, 0.0, 0.0, 1.0], |t| t.tangent_encoded());
+    }
+}
+
+impl Prim {
+    /// Generate MikkTSpace tangents per triangle corner, then split vertices
+    /// whose corners disagree on the tangent (mirrored UV islands).
+    fn add_tangents(&mut self) {
+        let mut m = MikkPrim { p: self, out: vec![[1.0, 0.0, 0.0, 1.0]; self.idx.len()] };
+        if bevy_mikktspace::generate_tangents(&mut m).is_err() {
+            return;
+        }
+        let corner_t = m.out;
+        let old = std::mem::take(self);
+        let mut remap: HashMap<(u32, [u32; 4]), u32> = HashMap::new();
+        for (c, &vi) in old.idx.iter().enumerate() {
+            let mut t = corner_t[c];
+            let len = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+            if len > 1e-8 && len.is_finite() {
+                t = [t[0] / len, t[1] / len, t[2] / len, if t[3] < 0.0 { -1.0 } else { 1.0 }];
+            } else {
+                t = [1.0, 0.0, 0.0, 1.0];
+            }
+            let key = (vi, t.map(f32::to_bits));
+            let ni = *remap.entry(key).or_insert_with(|| {
+                let v = vi as usize;
+                self.pos.extend_from_slice(&old.pos[v * 3..v * 3 + 3]);
+                self.nrm.extend_from_slice(&old.nrm[v * 3..v * 3 + 3]);
+                self.uv.extend_from_slice(&old.uv[v * 2..v * 2 + 2]);
+                self.col.extend_from_slice(&old.col[v * 4..v * 4 + 4]);
+                if !old.joints.is_empty() {
+                    self.joints.extend_from_slice(&old.joints[v * 4..v * 4 + 4]);
+                    self.weights.extend_from_slice(&old.weights[v * 4..v * 4 + 4]);
+                }
+                self.vids.push(old.vids[v]);
+                self.tangent.extend(t);
+                (self.vids.len() - 1) as u32
+            });
+            self.idx.push(ni);
+        }
+    }
+}
+
+/// glTF material JSON and the extensions it uses.
+fn material_json(m: &polly_core::scene::Material, tex_index: &HashMap<u32, usize>) -> (Value, Vec<&'static str>) {
+    let tex = |t: Option<u32>| t.and_then(|t| tex_index.get(&t)).copied();
+    let mut exts: Vec<&'static str> = Vec::new();
+    let mut pbr = json!({"baseColorFactor": m.base_color, "metallicFactor": m.metallic, "roughnessFactor": m.roughness});
+    if let Some(ti) = tex(m.texture) {
+        pbr["baseColorTexture"] = json!({"index": ti});
+    }
+    if let Some(ti) = tex(m.metallic_roughness_texture) {
+        pbr["metallicRoughnessTexture"] = json!({"index": ti});
+    }
+    let mut mj = json!({"name": m.name, "pbrMetallicRoughness": pbr, "doubleSided": m.double_sided});
+    if let Some(ti) = tex(m.normal_texture) {
+        mj["normalTexture"] = json!({"index": ti, "scale": m.normal_scale});
+    }
+    if let Some(ti) = tex(m.occlusion_texture) {
+        mj["occlusionTexture"] = json!({"index": ti, "strength": m.occlusion_strength});
+    }
+    if m.emissive.iter().any(|c| *c != 0.0) || m.emissive_texture.is_some() {
+        // An emissive texture alone needs a non-zero factor to show.
+        let f = if m.emissive.iter().all(|c| *c == 0.0) { [1.0; 3] } else { m.emissive };
+        mj["emissiveFactor"] = json!(f);
+        if let Some(ti) = tex(m.emissive_texture) {
+            mj["emissiveTexture"] = json!({"index": ti});
+        }
+    }
+    if let Some(c) = m.alpha_cutoff {
+        mj["alphaMode"] = json!("MASK");
+        mj["alphaCutoff"] = json!(c);
+    } else if m.blend {
+        mj["alphaMode"] = json!("BLEND");
+    }
+    let mut e: Vec<(&'static str, Value)> = Vec::new();
+    if m.unlit {
+        e.push(("KHR_materials_unlit", json!({})));
+    }
+    if m.emissive_strength != 1.0 && mj.get("emissiveFactor").is_some() {
+        e.push(("KHR_materials_emissive_strength", json!({"emissiveStrength": m.emissive_strength})));
+    }
+    if let Some(c) = m.clearcoat {
+        e.push(("KHR_materials_clearcoat", json!({"clearcoatFactor": c.factor, "clearcoatRoughnessFactor": c.roughness})));
+    }
+    if let Some(a) = m.anisotropy {
+        e.push(("KHR_materials_anisotropy", json!({"anisotropyStrength": a.strength, "anisotropyRotation": a.rotation})));
+    }
+    if let Some(t) = m.transmission {
+        e.push(("KHR_materials_transmission", json!({"transmissionFactor": t.factor})));
+        e.push(("KHR_materials_ior", json!({"ior": t.ior})));
+        if t.thickness > 0.0 {
+            e.push(("KHR_materials_volume", json!({"thicknessFactor": t.thickness})));
+        }
+    }
+    if let Some(sp) = m.specular {
+        e.push(("KHR_materials_specular", json!({"specularFactor": sp.factor, "specularColorFactor": sp.color})));
+    }
+    if !e.is_empty() {
+        exts = e.iter().map(|(k, _)| *k).collect();
+        mj["extensions"] = Value::Object(e.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+    }
+    (mj, exts)
 }
 
 /// Joint nodes of one exported skeleton (an armature).
@@ -226,7 +359,7 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
             break;
         }
     }
-    // Textures / images / samplers.
+    // Textures / images / samplers: one per texture used in any slot.
     let mut images = Vec::new();
     let mut textures = Vec::new();
     let mut samplers = Vec::new();
@@ -235,38 +368,38 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
         .iter()
         .flat_map(|id| scene.objects[id].mesh.faces.values().map(|f| f.material).collect::<Vec<_>>())
         .collect();
+    let material = |mid: &u32| scene.materials.get(mid).cloned().unwrap_or_else(|| scene.materials[&0].clone());
     for mid in &used_materials {
-        let Some(tid) = scene.materials.get(mid).and_then(|m| m.texture) else { continue };
-        if tex_index.contains_key(&tid) {
-            continue;
+        for (_, tid) in material(mid).textures() {
+            if tex_index.contains_key(&tid) {
+                continue;
+            }
+            let Some(t) = scene.textures.get(&tid) else { continue };
+            let png = crate::png(t)?;
+            let view = b.view(&png, None);
+            images.push(json!({"bufferView": view, "mimeType": "image/png", "name": t.name}));
+            let f = if t.filter == Filter::Nearest { NEAREST } else { LINEAR };
+            let sampler = json!({"magFilter": f, "minFilter": f, "wrapS": 10497, "wrapT": 10497});
+            let si = samplers.iter().position(|s| *s == sampler).unwrap_or_else(|| {
+                samplers.push(sampler);
+                samplers.len() - 1
+            });
+            textures.push(json!({"source": images.len() - 1, "sampler": si}));
+            tex_index.insert(tid, textures.len() - 1);
         }
-        let Some(t) = scene.textures.get(&tid) else { continue };
-        let png = crate::png(t)?;
-        let view = b.view(&png, None);
-        images.push(json!({"bufferView": view, "mimeType": "image/png", "name": t.name}));
-        let f = if t.filter == Filter::Nearest { NEAREST } else { LINEAR };
-        samplers.push(json!({"magFilter": f, "minFilter": f, "wrapS": 10497, "wrapT": 10497}));
-        textures.push(json!({"source": images.len() - 1, "sampler": samplers.len() - 1}));
-        tex_index.insert(tid, textures.len() - 1);
     }
 
     let mut materials = Vec::new();
     let mut mat_index: BTreeMap<u32, usize> = BTreeMap::new();
-    let mut uses_unlit = false;
+    // Materials whose primitives need tangents (normal-mapped).
+    let mut needs_tangents: BTreeSet<u32> = BTreeSet::new();
+    let mut extensions_used: BTreeSet<&str> = BTreeSet::new();
     for mid in &used_materials {
-        let m = scene.materials.get(mid).cloned().unwrap_or_else(|| scene.materials[&0].clone());
-        let mut pbr = json!({"baseColorFactor": m.base_color, "metallicFactor": 0.0, "roughnessFactor": 1.0});
-        if let Some(ti) = m.texture.and_then(|t| tex_index.get(&t)) {
-            pbr["baseColorTexture"] = json!({"index": ti});
-        }
-        let mut mj = json!({"name": m.name, "pbrMetallicRoughness": pbr, "doubleSided": m.double_sided});
-        if let Some(c) = m.alpha_cutoff {
-            mj["alphaMode"] = json!("MASK");
-            mj["alphaCutoff"] = json!(c);
-        }
-        if m.unlit {
-            mj["extensions"] = json!({"KHR_materials_unlit": {}});
-            uses_unlit = true;
+        let m = material(mid);
+        let (mj, exts) = material_json(&m, &tex_index);
+        extensions_used.extend(exts);
+        if m.normal_texture.is_some_and(|t| tex_index.contains_key(&t)) {
+            needs_tangents.insert(*mid);
         }
         materials.push(mj);
         mat_index.insert(*mid, materials.len() - 1);
@@ -279,7 +412,6 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
     let mut skin_info: HashMap<ObjectId, SkinInfo> = HashMap::new();
     // Nodes animated by an object's morph weights (its own node and its part nodes).
     let mut morph_nodes: BTreeMap<ObjectId, Vec<usize>> = BTreeMap::new();
-    let mut extensions_used: BTreeSet<&str> = BTreeSet::new();
     // Faces hidden by variants, grouped by which hide rules cover them: each
     // group becomes its own node so it can be hidden independently.
     let hide_groups: HideGroups = polly_core::variants::hide_groups(scene);
@@ -420,15 +552,21 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
         }
         for (group, prims) in groups {
             let mut pj = Vec::new();
-            for (mid, p) in prims {
+            for (mid, mut p) in prims {
                 if p.idx.is_empty() {
                     continue;
+                }
+                if needs_tangents.contains(&mid) {
+                    p.add_tangents();
                 }
                 let mut attrs = json!({
                     "POSITION": b.floats(&p.pos, 3, true),
                     "NORMAL": b.floats(&p.nrm, 3, false),
                     "TEXCOORD_0": b.floats(&p.uv, 2, false),
                 });
+                if !p.tangent.is_empty() {
+                    attrs["TANGENT"] = json!(b.floats(&p.tangent, 4, false));
+                }
                 if p.col.iter().any(|c| (*c - 1.0).abs() > 1e-6) {
                     attrs["COLOR_0"] = json!(b.floats(&p.col, 4, false));
                 }
@@ -651,9 +789,6 @@ pub fn export_glb(scene: &Scene, opts: &ExportOptions) -> Result<Vec<u8>> {
     }
     if !animations.is_empty() {
         doc["animations"] = json!(animations);
-    }
-    if uses_unlit {
-        extensions_used.insert("KHR_materials_unlit");
     }
     if !extensions_used.is_empty() {
         // Used, never required: importers that don't know them still load the file.

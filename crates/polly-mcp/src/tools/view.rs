@@ -210,8 +210,10 @@ fn contact_sheet(ctx: &mut Ctx, a: RenderArgs) -> Result<Out> {
 #[derive(Deserialize, JsonSchema)]
 struct UvLayout {
     object: Option<String>,
-    /// Texture to show (default: the object's first textured material).
+    /// Texture to show (default: the object's first textured material, in `slot`).
     texture: Option<String>,
+    /// Material slot to show when `texture` is not given: base (default), normal, metallic_roughness, occlusion, emissive.
+    slot: Option<String>,
     /// Image size (default 512).
     size: Option<u32>,
     #[serde(default = "yes")]
@@ -225,10 +227,17 @@ fn yes() -> bool {
 fn uv_layout(ctx: &mut Ctx, a: UvLayout) -> Result<Out> {
     let s = &ctx.doc.scene;
     let id = resolve(s, &a.object)?;
+    let slot = match a.slot.as_deref() {
+        None => polly_core::scene::Slot::Base,
+        Some(n) => polly_core::scene::Slot::parse(n).with_context(|| format!("unknown slot '{n}' (base, normal, metallic_roughness, occlusion, emissive)"))?,
+    };
     let tex = match &a.texture {
         Some(t) => Some(s.resolve_texture(t)?),
-        None => s.object(id)?.mesh.faces.values().find_map(|f| s.materials.get(&f.material)?.texture),
+        None => s.object(id)?.mesh.faces.values().find_map(|f| s.materials.get(&f.material)?.slot(slot)),
     };
+    if a.texture.is_none() && a.slot.is_some() && tex.is_none() {
+        bail!("no material on '{}' has a {} texture", s.objects[&id].name, slot.name());
+    }
     let img = polly_render::render_uv_layout(s, id, tex, a.size.unwrap_or(512).clamp(64, 2048), a.show_ids);
     let mut j = json!({"object": s.objects[&id].name, "texture": tex.and_then(|t| s.textures.get(&t)).map(|t| &t.name)});
     if let Some(t) = tex.and_then(|t| s.textures.get(&t)) {

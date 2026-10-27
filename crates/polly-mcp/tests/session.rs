@@ -1455,3 +1455,84 @@ fn agent_followups() {
     let r = call(&s, "move", json!({"object": "Strip", "elements": [ids[0].clone()], "offset": [0.1, 0, 0], "mirror": true, "mirror_tolerance": 0.2}));
     assert_eq!(r["mirror"]["partners_moved"], 1, "{r}");
 }
+
+fn glb_json(path: &std::path::Path) -> Value {
+    let glb = std::fs::read(path).unwrap();
+    let len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+    serde_json::from_slice(&glb[20..20 + len]).unwrap()
+}
+
+#[test]
+fn pbr_materials() {
+    let s = server();
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Box"}));
+    call(&s, "auto_seams", json!({}));
+    call(&s, "unwrap", json!({"texture_size": [32, 32]}));
+    let t = call(&s, "create_texture", json!({"name": "N", "width": 32, "height": 32, "kind": "normal"}));
+    assert_eq!(t["linear"], true);
+    let tex = call(&s, "get_texture", json!({"texture": "N"}));
+    assert!(tex.to_string().contains("80"), "flat normal fill: {tex}");
+    call_err(&s, "create_texture", json!({"name": "Big", "width": 8192, "height": 8}));
+    call(&s, "create_texture", json!({"name": "Big", "width": 4096, "height": 8}));
+    call_err(&s, "create_texture", json!({"name": "X", "kind": "normal", "material": "M", "slot": "base"}));
+    let m = call(
+        &s,
+        "create_material",
+        json!({
+            "name": "Paint", "color": "#3366cc", "roughness": 0.3, "metallic": 0.8,
+            "normal_texture": "N", "emissive": "#ff6600", "emissive_strength": 2.0,
+            "clearcoat": {"factor": 1.0, "roughness": 0.05}
+        }),
+    );
+    assert_eq!(m["index"], 1);
+    call_err(&s, "update_material", json!({"material": "Paint", "blend": true, "alpha_cutoff": 0.5}));
+    call_err(&s, "update_material", json!({"material": "Paint", "roughness": 2.0}));
+    call(&s, "assign_material", json!({"elements": ["all"], "material": "Paint"}));
+    let d = call(&s, "describe_scene", json!({}));
+    let pm = &d["materials"][1];
+    assert_eq!(pm["normal_texture"], "N");
+    assert_eq!(pm["clearcoat"]["factor"], 1.0);
+    assert!(pm.get("occlusion_texture").is_none() && d["materials"][0].get("roughness").is_none(), "{d}");
+
+    let dir = std::env::temp_dir().join(format!("polly-pbr-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let glb = dir.join("pbr.glb");
+    call(&s, "export_glb", json!({"path": glb.to_str().unwrap()}));
+    let j = glb_json(&glb);
+    let mat = j["materials"].as_array().unwrap().iter().find(|m| m["name"] == "Paint").unwrap().clone();
+    assert!((mat["pbrMetallicRoughness"]["roughnessFactor"].as_f64().unwrap() - 0.3).abs() < 1e-6);
+    assert!((mat["pbrMetallicRoughness"]["metallicFactor"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+    assert!(mat["normalTexture"].is_object());
+    assert_eq!(mat["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"], 2.0);
+    assert!(mat["extensions"]["KHR_materials_clearcoat"].is_object());
+    assert!(j["meshes"][0]["primitives"][0]["attributes"]["TANGENT"].is_number());
+
+    // The render shows the emissive glow (orange added to blue) and says PBR channels are not shown yet.
+    let r = s.call("render", json!({"view": "front", "overlays": {"wireframe": false, "grid": false}, "legend": false}));
+    if r.is_error != Some(true) {
+        assert!(text(&r).contains("PBR channels not shown"), "{}", text(&r));
+        std::fs::write(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("session_pbr.png"), &images(&r)[0]).unwrap();
+        let img = image::load_from_memory(&images(&r)[0]).unwrap().to_rgba8();
+        let p = img.get_pixel(256, 256);
+        assert!(p[0] > 200 && p[1] > 100, "emissive orange should show at the centre, got {p:?}");
+    } else {
+        eprintln!("skipping render: {}", text(&r));
+    }
+
+    // Clearing the normal map removes tangents; the texture stays linear.
+    call(&s, "update_material", json!({"material": "Paint", "normal_texture": ""}));
+    call(&s, "update_material", json!({"material": "Paint", "clearcoat": null, "emissive": ""}));
+    call(&s, "export_glb", json!({"path": glb.to_str().unwrap()}));
+    let j = glb_json(&glb);
+    assert!(j["meshes"][0]["primitives"][0]["attributes"].get("TANGENT").is_none());
+    let mat = &j["materials"].as_array().unwrap().iter().find(|m| m["name"] == "Paint").unwrap().clone();
+    assert!(mat.get("extensions").is_none() && mat.get("emissiveFactor").is_none(), "{mat}");
+
+    // A colour texture moved into a data slot becomes linear, with a note.
+    call(&s, "create_texture", json!({"name": "C", "width": 8, "height": 8}));
+    let u = call(&s, "update_material", json!({"material": "Paint", "occlusion_texture": "C"}));
+    assert!(u["notes"][0].as_str().unwrap().contains("linear"), "{u}");
+    let uv = s.call("render_uv_layout", json!({"slot": "occlusion"}));
+    assert!(text(&uv).contains("\"C\""), "{}", text(&uv));
+    std::fs::remove_dir_all(dir).ok();
+}

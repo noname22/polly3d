@@ -25,7 +25,8 @@ fn walk(v: &mut Value, schema: &Value, defs: &Value, palette: Option<&[Rgba]>, d
         }
     }
     if is_rgba_schema(sm) {
-        if let Value::String(s) = v {
+        // "" is left alone: tools use it to remove an optional colour.
+        if let Some(s) = v.as_str().filter(|s| !s.is_empty()) {
             let c = polly_paint::parse_color(s, palette).map_err(|e| anyhow::anyhow!("bad colour '{s}': {e}"))?;
             *v = json!(c);
         }
