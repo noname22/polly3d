@@ -783,6 +783,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_gltf"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b5c4e1779a522f706853f75fc11107a032d4e4f92d26fbef4c36e825d00afdf"
+dependencies = [
+ "async-lock",
+ "base64 0.23.1",
+ "bevy_app",
+ "bevy_asset",
+ "bevy_camera",
+ "bevy_color",
+ "bevy_curve",
+ "bevy_ecs",
+ "bevy_image",
+ "bevy_light",
+ "bevy_material",
+ "bevy_math",
+ "bevy_mesh",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_tasks",
+ "bevy_transform",
+ "bevy_world_serialization",
+ "fixedbitset",
+ "gltf",
+ "itertools 0.14.0",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "thiserror 2.0.21",
+ "tracing",
+ "wgpu-types",
+]
+
+[[package]]
 name = "bevy_image"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -866,6 +902,7 @@ dependencies = [
  "bevy_extract",
  "bevy_gizmos",
  "bevy_gizmos_render",
+ "bevy_gltf",
  "bevy_image",
  "bevy_input",
  "bevy_input_focus",
@@ -887,6 +924,7 @@ dependencies = [
  "bevy_transform",
  "bevy_utils",
  "bevy_window",
+ "bevy_world_serialization",
 ]
 
 [[package]]
@@ -1021,6 +1059,7 @@ dependencies = [
  "glam 0.33.12",
  "half",
  "hexasphere",
+ "serde",
  "thiserror 2.0.21",
  "tracing",
  "wgpu-types",
@@ -1048,6 +1087,7 @@ dependencies = [
  "bevy_diagnostic",
  "bevy_ecs",
  "bevy_extract",
+ "bevy_gltf",
  "bevy_image",
  "bevy_light",
  "bevy_log",
@@ -1097,6 +1137,16 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-time",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "bevy_polly"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "polly-core",
+ "polly-export",
+ "serde_json",
 ]
 
 [[package]]
@@ -1384,6 +1434,28 @@ dependencies = [
  "log",
  "raw-window-handle",
  "serde",
+]
+
+[[package]]
+name = "bevy_world_serialization"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eef3a23ed3899c88467ce27a0420a1dadeb543981c2e1b9617f6ecf6e5fce1bf"
+dependencies = [
+ "bevy_app",
+ "bevy_asset",
+ "bevy_camera",
+ "bevy_derive",
+ "bevy_ecs",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_transform",
+ "bevy_utils",
+ "derive_more",
+ "ron",
+ "serde",
+ "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
@@ -2562,6 +2634,7 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "num-traits",
+ "serde",
  "zerocopy",
 ]
 
@@ -3928,6 +4001,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bevy",
+ "bevy_polly",
  "image",
  "polly-core",
  "polly-render",
@@ -3967,6 +4041,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "bevy_polly",
  "gltf",
  "image",
  "polly-bevy",

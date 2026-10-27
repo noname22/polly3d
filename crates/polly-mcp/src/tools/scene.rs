@@ -181,6 +181,9 @@ fn describe_scene(ctx: &mut Ctx, _: Empty) -> Result<Out> {
     if !s.slots.is_empty() {
         j["slots"] = json!(s.slots.iter().map(|(k, v)| (k.clone(), json!({"active": v.active, "default": v.default, "variants": v.variants.iter().map(|x| x.name.clone()).collect::<Vec<_>>()}))).collect::<serde_json::Map<_, _>>());
     }
+    if let Some(d) = &s.asset_dir {
+        j["asset_dir"] = json!(d);
+    }
     if !s.lighting.is_default() {
         j["lighting"] = json!(s.lighting);
     }

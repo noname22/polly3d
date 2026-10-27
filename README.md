@@ -64,6 +64,7 @@ thread; it never opens a window, and the viewer only displays its images. Set
 | `polly-paint` | palettes, crisp pixel drawing, ordered dithering, procedural fills (bricks, planks, noise…), face fills, quantize |
 | `polly-render` | CPU render helpers: cameras and framing, picking, overlay line lists, ID labels and legend, contact sheets, UV layout view |
 | `polly-bevy` | the renderer: a headless Bevy app on a worker thread (`StandardMaterial` shading, overlay lines, readback), shared by the agent's renders and the viewer |
+| `bevy_polly` | for games: `PollyMaterial` (StandardMaterial + a named custom shader and its parameters) and a plugin that applies it to loaded Polly GLBs; also used by Polly's renderer |
 | `polly-export` | GLB export (textures, sampler filter, skins, morph targets, animations), `.polly` project files |
 | `polly-mcp` | MCP tool layer (rmcp) |
 | `polly` | binary: stdio server + optional egui viewer |
@@ -145,6 +146,12 @@ per side. Export writes every channel and the matching `KHR_materials_*`
 extensions, and adds MikkTSpace tangents to normal-mapped meshes. Renders use
 Bevy's `StandardMaterial`, so every channel shows up in the agent's images and
 the viewer just as it will in the game.
+
+A material can also name a **custom shader**: a WESL fragment shader in the
+game's asset folder (`shaders/<name>.wesl`, written with `write_shader`) with
+parameters. Polly renders it and reloads it when the file changes; the GLB
+carries the name and parameters in the material's extras, and the
+`bevy_polly` crate applies the same shader in the game.
 
 ## Lighting and effects
 

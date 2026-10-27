@@ -15,6 +15,7 @@ polly-render = { path = "crates/polly-render" }
 polly-export = { path = "crates/polly-export" }
 polly-mcp = { path = "crates/polly-mcp" }
 polly-bevy = { path = "crates/polly-bevy" }
+bevy_polly = { path = "crates/bevy_polly", default-features = false }
 
 anyhow = "1.0.104"
 thiserror = "2"

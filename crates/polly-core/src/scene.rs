@@ -220,6 +220,16 @@ pub struct Specular {
     pub color: [f32; 3],
 }
 
+/// A custom fragment shader on top of the standard PBR material: a WESL file
+/// `shaders/<name>.wesl` in the scene's asset directory, plus parameters
+/// (1..4 numbers each) packed into vec4 slots in alphabetical order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CustomShader {
+    pub name: String,
+    #[serde(default)]
+    pub params: BTreeMap<String, Vec<f32>>,
+}
+
 fn one() -> f32 {
     1.0
 }
@@ -278,6 +288,9 @@ pub struct Material {
     pub transmission: Option<Transmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub specular: Option<Specular>,
+    /// Custom shader (exported in `extras.polly.shader`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shader: Option<CustomShader>,
 }
 
 impl Default for Material {
@@ -304,6 +317,7 @@ impl Default for Material {
             anisotropy: None,
             transmission: None,
             specular: None,
+            shader: None,
         }
     }
 }
@@ -356,6 +370,7 @@ impl Material {
             || self.anisotropy.is_some()
             || self.transmission.is_some()
             || self.specular.is_some()
+            || self.shader.is_some()
     }
 }
 
@@ -378,6 +393,10 @@ pub struct Scene {
     /// Reference images shown in the axis views.
     #[serde(default)]
     pub references: Vec<crate::reference::Reference>,
+    /// Directory holding the project's game assets (custom shaders live in
+    /// `<asset_dir>/shaders`). Usually the game's `assets` folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_dir: Option<String>,
     /// Lights and camera effects for renders.
     #[serde(default, skip_serializing_if = "crate::lighting::Lighting::is_default")]
     pub lighting: crate::lighting::Lighting,
@@ -407,6 +426,7 @@ impl Default for Scene {
             slots: BTreeMap::new(),
             references: Vec::new(),
             lighting: Default::default(),
+            asset_dir: None,
             next_clip: 1,
             next_object: 1,
             next_material: 1,
@@ -416,6 +436,11 @@ impl Default for Scene {
 }
 
 impl Scene {
+    /// Path of a custom shader's source file, if the asset directory is set.
+    pub fn shader_path(&self, name: &str) -> Option<std::path::PathBuf> {
+        Some(std::path::Path::new(self.asset_dir.as_ref()?).join("shaders").join(format!("{name}.wesl")))
+    }
+
     fn unique_name(&self, base: &str) -> String {
         if !self.objects.values().any(|o| o.name == base) {
             return base.to_string();
@@ -666,6 +691,7 @@ mod tests {
             anisotropy: Some(Anisotropy { strength: 0.6, rotation: 0.5 }),
             transmission: Some(Transmission { factor: 0.9, ior: 1.45, thickness: 0.02 }),
             specular: Some(Specular { factor: 0.8, color: [1.0, 0.9, 0.8] }),
+            shader: Some(CustomShader { name: "toon".into(), params: BTreeMap::from([("bands".into(), vec![3.0])]) }),
             ..Material::new("x", [1.0; 4])
         };
         let j = serde_json::to_string(&m).unwrap();

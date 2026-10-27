@@ -7,6 +7,7 @@ edition.workspace = true
 polly-core.workspace = true
 polly-render.workspace = true
 bevy.workspace = true
+bevy_polly.workspace = true
 anyhow.workspace = true
 image = { workspace = true, features = ["hdr"] }
 serde_json.workspace = true

@@ -271,6 +271,9 @@ fn material_json(m: &polly_core::scene::Material, tex_index: &HashMap<u32, usize
     if let Some(sp) = m.specular {
         e.push(("KHR_materials_specular", json!({"specularFactor": sp.factor, "specularColorFactor": sp.color})));
     }
+    if let Some(sh) = &m.shader {
+        mj["extras"] = json!({"polly": {"shader": {"name": sh.name, "params": sh.params}}});
+    }
     if !e.is_empty() {
         exts = e.iter().map(|(k, _)| *k).collect();
         mj["extensions"] = Value::Object(e.into_iter().map(|(k, v)| (k.to_string(), v)).collect());

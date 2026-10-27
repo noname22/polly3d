@@ -18,6 +18,7 @@ polly-paint.workspace = true
 polly-uv.workspace = true
 polly-render.workspace = true
 polly-bevy.workspace = true
+bevy_polly.workspace = true
 image.workspace = true
 
 [dev-dependencies]

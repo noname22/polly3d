@@ -34,6 +34,8 @@ use polly_render::{Frame, RenderOptions};
 
 use crate::conv::{m4, v3};
 use crate::env;
+use bevy::pbr::ExtendedMaterial;
+use bevy_polly::{PollyMaterial, PollyShader};
 use crate::lines::{self, LineMaterial};
 use crate::projection::PollyProjection;
 
@@ -79,6 +81,20 @@ struct Cached<T> {
     last_used: u64,
 }
 
+/// A material of either kind: plain PBR or PBR with a custom shader.
+#[derive(Clone)]
+enum MatHandle {
+    Standard(Handle<StandardMaterial>),
+    Custom(Handle<PollyMaterial>),
+}
+
+/// A custom shader loaded from the asset directory.
+struct ShaderFile {
+    name: String,
+    handle: Handle<Shader>,
+    stamp: Option<std::time::SystemTime>,
+}
+
 /// Prefiltered cubemaps of one environment.
 #[derive(Clone)]
 pub struct EnvMaps {
@@ -96,7 +112,11 @@ pub struct Gpu {
     environments: HashMap<String, EnvMaps>,
     targets: HashMap<[u32; 2], Handle<Image>>,
     objects: HashMap<u64, ObjectEntry>,
-    materials: HashMap<u64, Cached<Handle<StandardMaterial>>>,
+    materials: HashMap<u64, Cached<MatHandle>>,
+    /// Custom shaders by source path.
+    shaders: HashMap<std::path::PathBuf, ShaderFile>,
+    /// Remarks for the current job (missing shaders, compile errors).
+    notes: Vec<String>,
     images: HashMap<u64, Cached<Handle<Image>>>,
     line_material: Handle<LineMaterial>,
     /// Entities and meshes that live for one job only (lines, selection, references).
@@ -136,6 +156,7 @@ impl Gpu {
         let shader = app.world_mut().resource_mut::<Assets<Shader>>().add(Shader::from_wesl(lines::LINE_SHADER, "polly://line.wesl"));
         lines::set_shader(shader);
         app.add_plugins(MaterialPlugin::<LineMaterial>::default());
+        app.add_plugins(MaterialPlugin::<PollyMaterial>::default());
         app.finish();
         app.cleanup();
         let mut apps = std::mem::take(app.sub_apps_mut());
@@ -156,6 +177,8 @@ impl Gpu {
             targets: HashMap::new(),
             objects: HashMap::new(),
             materials: HashMap::new(),
+            shaders: HashMap::new(),
+            notes: Vec::new(),
             images: HashMap::new(),
             line_material,
             transient: Vec::new(),
@@ -209,8 +232,10 @@ impl Gpu {
     }
 
     /// Render one job and read the image back (sRGB RGBA8, unannotated).
-    pub fn render(&mut self, job: &Job) -> Result<image::RgbaImage> {
+    /// Render one job; returns the image and remarks for the agent.
+    pub fn render(&mut self, job: &Job) -> Result<(image::RgbaImage, Vec<String>)> {
         self.job += 1;
+        self.notes.clear();
         let [w, h] = job.frame.size;
         let scene = &job.scene;
         let frame = &job.frame;
@@ -229,7 +254,15 @@ impl Gpu {
             let batches: Vec<(u32, Entity)> = entry.batches.iter().map(|b| (b.material, b.entity)).collect();
             for (mid, e) in batches {
                 let mat = self.material(scene, mid, o)?;
-                self.world().entity_mut(e).insert(MeshMaterial3d(mat));
+                let mut ent = self.world().entity_mut(e);
+                match mat {
+                    MatHandle::Standard(h) => {
+                        ent.remove::<MeshMaterial3d<PollyMaterial>>().insert(MeshMaterial3d(h));
+                    }
+                    MatHandle::Custom(h) => {
+                        ent.remove::<MeshMaterial3d<StandardMaterial>>().insert(MeshMaterial3d(h));
+                    }
+                }
                 shown.push(e);
             }
         }
@@ -403,7 +436,75 @@ impl Gpu {
         for p in rgba.pixels_mut() {
             p.0[3] = 255;
         }
-        Ok(rgba)
+        self.shader_errors();
+        Ok((rgba, std::mem::take(&mut self.notes)))
+    }
+
+    /// Load (or reload, when the file changed) a custom shader; `None` with a
+    /// note when it can't be used.
+    fn custom_shader(&mut self, scene: &Scene, name: &str) -> Option<()> {
+        let Some(path) = scene.shader_path(name) else {
+            self.note(format!("material shader '{name}' needs the asset directory (write_shader sets it); shown without it"));
+            return None;
+        };
+        let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if stamp.is_none() {
+            self.note(format!("shader file {} not found; '{name}' shown without its shader", path.display()));
+            return None;
+        }
+        let current = self.shaders.get(&path).is_some_and(|f| f.stamp == stamp);
+        if !current {
+            let src = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.note(format!("cannot read {}: {e}", path.display()));
+                    return None;
+                }
+            };
+            let shader = Shader::from_wesl(src, format!("polly://shaders/{name}.wesl"));
+            let existing = self.shaders.get(&path).map(|f| f.handle.clone());
+            let handle = match existing {
+                // Same handle, new source: Bevy recompiles the pipelines using it (hot reload).
+                Some(h) => {
+                    let _ = self.world().resource_mut::<Assets<Shader>>().insert(h.id(), shader);
+                    h
+                }
+                None => self.world().resource_mut::<Assets<Shader>>().add(shader),
+            };
+            bevy_polly::register_shader(name, handle.clone());
+            self.shaders.insert(path, ShaderFile { name: name.to_string(), handle, stamp });
+        }
+        Some(())
+    }
+
+    fn note(&mut self, n: String) {
+        if !self.notes.contains(&n) {
+            self.notes.push(n);
+        }
+    }
+
+    /// Compile errors of custom shaders, as notes.
+    fn shader_errors(&mut self) {
+        use bevy::render::render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor};
+        let names: HashMap<AssetId<Shader>, String> = self.shaders.values().map(|f| (f.handle.id(), f.name.clone())).collect();
+        if names.is_empty() {
+            return;
+        }
+        let mut errors = Vec::new();
+        if let Some(render) = self.apps.sub_apps.values().find(|a| a.world().contains_resource::<PipelineCache>()) {
+            let cache = render.world().resource::<PipelineCache>();
+            for p in cache.pipelines() {
+                let CachedPipelineState::Err(err) = &p.state else { continue };
+                let PipelineDescriptor::RenderPipelineDescriptor(d) = &p.descriptor else { continue };
+                let Some(f) = &d.fragment else { continue };
+                if let Some(name) = names.get(&f.shader.id()) {
+                    errors.push(format!("shader '{name}' failed to compile (faces using it are not drawn): {err}"));
+                }
+            }
+        }
+        for e in errors {
+            self.note(e);
+        }
     }
 
     /// The render target for `size`; `true` when it was just created.
@@ -524,14 +625,18 @@ impl Gpu {
         h
     }
 
-    fn material(&mut self, scene: &Scene, mid: u32, o: &RenderOptions) -> Result<Handle<StandardMaterial>> {
+    fn material(&mut self, scene: &Scene, mid: u32, o: &RenderOptions) -> Result<MatHandle> {
         let missing = PMaterial::new("missing", [0.8, 0.8, 0.8, 1.0]);
         let m = scene.materials.get(&mid).unwrap_or(&missing).clone();
         let tex_ptrs: Vec<(u32, usize, bool)> = m
             .textures()
             .filter_map(|(_, t)| scene.textures.get(&t).map(|x| (t, Arc::as_ptr(&x.pixels) as usize, x.linear)))
             .collect();
-        let key = hash_of((mid, serde_json::to_string(&m).unwrap_or_default(), tex_ptrs, o.filter.map(|f| f as u8)));
+        let custom = match &m.shader {
+            Some(sh) => self.custom_shader(scene, &sh.name).map(|_| sh.clone()),
+            None => None,
+        };
+        let key = hash_of((mid, serde_json::to_string(&m).unwrap_or_default(), tex_ptrs, o.filter.map(|f| f as u8), custom.is_some()));
         let job = self.job;
         if let Some(c) = self.materials.get_mut(&key) {
             c.last_used = job;
@@ -584,7 +689,12 @@ impl Gpu {
             sm.reflectance = s.factor * 0.5;
             sm.specular_tint = Color::linear_rgb(s.color[0], s.color[1], s.color[2]);
         }
-        let h = self.world().resource_mut::<Assets<StandardMaterial>>().add(sm);
+        let h = match custom {
+            Some(sh) => MatHandle::Custom(
+                self.world().resource_mut::<Assets<PollyMaterial>>().add(ExtendedMaterial { base: sm, extension: PollyShader::new(&sh.name, &sh.params) }),
+            ),
+            None => MatHandle::Standard(self.world().resource_mut::<Assets<StandardMaterial>>().add(sm)),
+        };
         self.materials.insert(key, Cached { value: h.clone(), _keep: None, last_used: job });
         Ok(h)
     }

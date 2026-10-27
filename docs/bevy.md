@@ -4,10 +4,9 @@ This page covers loading a Polly GLB with swappable gear in **Bevy 0.20**,
 showing only the default loadout, and swapping variants at runtime. For the
 file layout and metadata, see [gltf-extras.md](gltf-extras.md).
 
-> **Status:** these snippets were written against the `bevy_gltf` /
-> `bevy_world_serialization` 0.20.0 sources. They have not been compiled or
-> run. Treat them as a starting point; a ready-made `bevy_polly` crate may
-> follow.
+> **Status:** the loadout snippets were written against the `bevy_gltf` /
+> `bevy_world_serialization` 0.20.0 sources and have not been compiled. The
+> custom-shader support is the tested `bevy_polly` crate.
 
 ## What Bevy does with the file
 
@@ -25,6 +24,37 @@ turns each into a `StandardMaterial` with nothing extra to do:
 - `KHR_materials_clearcoat`, `_anisotropy`, `_transmission`, `_ior`, `_volume` and `_specular`. Some of these are behind Bevy cargo features (`pbr_multi_layer_material_textures`, `pbr_anisotropy_texture`, `pbr_transmission_textures`, `pbr_specular_textures`) when they use textures; Polly writes only factors for them.
 
 Nearest-filtered textures carry a nearest sampler, which Bevy honours.
+
+## Custom shaders
+
+Materials can name a custom shader (`extras.polly.shader`, see
+[gltf-extras.md](gltf-extras.md)). The `bevy_polly` crate in this repository
+handles them:
+
+```rust
+use bevy::prelude::*;
+use bevy_polly::PollyMaterialsPlugin;
+
+App::new()
+    .add_plugins(DefaultPlugins)
+    // Shaders are loaded from assets/shaders/<name>.wesl (hot-reloaded with
+    // Bevy's `file_watcher` feature).
+    .add_plugins(PollyMaterialsPlugin::default())
+    .run();
+```
+
+When a glTF mesh entity spawns with such a material, the plugin replaces its
+`MeshMaterial3d<StandardMaterial>` with a `MeshMaterial3d<PollyMaterial>`:
+the same `StandardMaterial` extended with the parameters
+(`ExtendedMaterial<StandardMaterial, PollyShader>`). One material type covers
+every shader; the fragment shader is picked per material by name.
+
+Shaders are WESL fragment shaders in Bevy's extended-material style (Bevy 0.20
+imports its PBR functions from WESL modules). Parameters arrive as
+`polly.values[i]`, an `array<vec4<f32>, 16>` at binding 100 of the material
+group, in alphabetical order of the parameter names. Polly's `write_shader`
+tool writes a template, and Polly renders with the same `bevy_polly` code, so
+the shader looks the same in the agent's renders and in the game.
 
 ## Loading and hiding the alternatives
 

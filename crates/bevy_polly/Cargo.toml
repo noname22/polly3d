@@ -1,0 +1,20 @@
+[package]
+name = "bevy_polly"
+version.workspace = true
+edition.workspace = true
+description = "Bevy runtime support for Polly3D models: custom shader materials from glTF extras."
+
+[features]
+default = ["gltf"]
+# Swap glTF materials tagged with `extras.polly.shader` for PollyMaterial.
+gltf = ["bevy/bevy_gltf"]
+
+[dependencies]
+bevy.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+polly-core.workspace = true
+polly-export.workspace = true
+# Spawning glTF scenes needs reflection registration (a default Bevy feature in games).
+bevy = { workspace = true, features = ["reflect_auto_register"] }

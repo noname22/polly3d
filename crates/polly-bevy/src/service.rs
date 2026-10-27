@@ -9,7 +9,7 @@ use polly_render::{Rendered, RenderOptions, frame};
 
 use crate::gpu::{Gpu, Job};
 
-type Reply = mpsc::Sender<Result<image::RgbaImage>>;
+type Reply = mpsc::Sender<Result<(image::RgbaImage, Vec<String>)>>;
 
 enum Request {
     Render(Job, Reply),
@@ -66,8 +66,10 @@ impl BevyRenderer {
         let (tx, rx) = mpsc::channel();
         let job = Job { scene: scene.clone(), opts: o.clone(), frame: f.clone() };
         self.tx.lock().unwrap_or_else(|e| e.into_inner()).send(Request::Render(job, tx)).map_err(|_| anyhow!("the render service stopped"))?;
-        let image = rx.recv().context("the render service stopped")??;
-        Ok(frame::finish(image, scene, o, &f))
+        let (image, notes) = rx.recv().context("the render service stopped")??;
+        let mut r = frame::finish(image, scene, o, &f);
+        r.notes.extend(notes);
+        Ok(r)
     }
 
     /// Cache statistics (for tests and diagnostics).

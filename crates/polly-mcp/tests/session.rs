@@ -1570,3 +1570,65 @@ fn lighting_and_effects() {
     assert_eq!(call(&s, "describe_scene", json!({}))["lighting"]["bloom"].as_f64().unwrap(), 0.1f32 as f64);
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn custom_shaders() {
+    let s = server();
+    let dir = std::env::temp_dir().join(format!("polly-shader-{}", std::process::id()));
+    let assets = dir.join("assets");
+    call(&s, "add_primitive", json!({"shape": {"kind": "cube"}, "name": "Box"}));
+    call(&s, "create_material", json!({"name": "Fx", "color": "#808080", "unlit": true, "shader": {"name": "flat", "params": {"color": [1, 0, 0, 1], "gain": 1}}}));
+    call(&s, "assign_material", json!({"elements": ["all"], "material": "Fx"}));
+    call_err(&s, "update_material", json!({"material": "Fx", "shader": {"name": "bad name"}}));
+    let opts = json!({"view": "front", "overlays": {"grid": false, "wireframe": false, "selection": false}, "legend": false, "width": 128, "height": 128});
+    // No asset directory yet: rendered as the plain material, with a note.
+    let r = s.call("render", opts.clone());
+    if r.is_error == Some(true) {
+        eprintln!("skipping: {}", text(&r));
+        return;
+    }
+    assert!(text(&r).contains("asset directory"), "{}", text(&r));
+    let w = call(&s, "write_shader", json!({"name": "flat", "asset_dir": assets.to_str().unwrap()}));
+    assert_eq!(w["slots"], json!(["polly.values[0] = color", "polly.values[1] = gain"]));
+    assert_eq!(call(&s, "describe_scene", json!({}))["asset_dir"], assets.to_str().unwrap());
+    let centre = |r: &CallToolResult| *image::load_from_memory(&images(r)[0]).unwrap().to_rgba8().get_pixel(64, 64);
+    // The template is standard PBR: same as the unlit grey.
+    let r = s.call("render", opts.clone());
+    assert!(!text(&r).contains("failed"), "{}", text(&r));
+    let grey = centre(&r);
+    assert!((grey[0] as i32 - grey[1] as i32).abs() < 4, "{grey:?}");
+    // A shader that outputs its colour parameter.
+    let src = |c: &str| {
+        format!(
+            "import bevy_pbr::render::forward_io::{{VertexOutput, FragmentOutput}};\n\
+             struct PollyParams {{ values: array<vec4<f32>, 16> }}\n\
+             @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> polly: PollyParams;\n\
+             @fragment fn fragment(in: VertexOutput) -> FragmentOutput {{ var out: FragmentOutput; out.color = {c}; return out; }}\n"
+        )
+    };
+    call(&s, "write_shader", json!({"name": "flat", "source": src("polly.values[0] * polly.values[1].x")}));
+    let red = centre(&s.call("render", opts.clone()));
+    assert!(red[0] > 240 && red[1] < 20, "{red:?}");
+    // Parameters change without touching the file.
+    call(&s, "update_material", json!({"material": "Fx", "shader": {"name": "flat", "params": {"color": [0, 0, 1, 1], "gain": 1}}}));
+    let blue = centre(&s.call("render", opts.clone()));
+    assert!(blue[2] > 240 && blue[0] < 20, "{blue:?}");
+    // Compile errors come back as notes.
+    call(&s, "write_shader", json!({"name": "flat", "source": src("this is not wesl")}));
+    let r = s.call("render", opts.clone());
+    assert!(text(&r).contains("failed to compile"), "{}", text(&r));
+    // Fixing the file reloads it.
+    call(&s, "write_shader", json!({"name": "flat", "source": src("vec4<f32>(0.0, 1.0, 0.0, 1.0)")}));
+    let r = s.call("render", opts.clone());
+    assert!(!text(&r).contains("failed"), "fixed shader still reported: {}", text(&r));
+    let green = centre(&r);
+    assert!(green[1] > 240 && green[0] < 20, "{green:?}");
+    // Exported in the material's extras.
+    let glb = dir.join("s.glb");
+    call(&s, "export_glb", json!({"path": glb.to_str().unwrap()}));
+    let j = glb_json(&glb);
+    let m = j["materials"].as_array().unwrap().iter().find(|m| m["name"] == "Fx").unwrap().clone();
+    assert_eq!(m["extras"]["polly"]["shader"]["name"], "flat");
+    assert_eq!(m["extras"]["polly"]["shader"]["params"]["color"], json!([0.0, 0.0, 1.0, 1.0]));
+    std::fs::remove_dir_all(dir).ok();
+}

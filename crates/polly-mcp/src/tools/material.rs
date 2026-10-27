@@ -2,7 +2,11 @@
 //! occlusion and emissive maps, alpha modes) plus optional KHR extensions.
 
 use anyhow::{Result, bail};
-use polly_core::scene::{Anisotropy, Clearcoat, Material, Scene, Slot, Specular, TextureId, Transmission};
+use polly_core::scene::{Anisotropy, Clearcoat, CustomShader, Material, Scene, Slot, Specular, TextureId, Transmission};
+
+pub fn valid_shader_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 64 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -80,6 +84,25 @@ pub struct PbrArgs {
     #[serde(default, deserialize_with = "nullable")]
     #[schemars(with = "Option<Specular>")]
     specular: Option<Option<Specular>>,
+    /// Custom shader {name, params: {name: number or [up to 4 numbers]}} from <asset_dir>/shaders/<name>.wesl (see write_shader). null removes.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schemars(with = "Option<ShaderArg>")]
+    shader: Option<Option<ShaderArg>>,
+}
+
+#[derive(Deserialize, JsonSchema, Clone)]
+pub struct ShaderArg {
+    name: String,
+    /// Parameter values: a number or an array of up to 4 numbers each (packed into vec4 slots alphabetically).
+    #[serde(default)]
+    params: std::collections::BTreeMap<String, ParamValue>,
+}
+
+#[derive(Deserialize, JsonSchema, Clone)]
+#[serde(untagged)]
+pub enum ParamValue {
+    One(f32),
+    Many(Vec<f32>),
 }
 
 /// Resolve a texture argument; `Some(None)` = remove.
@@ -144,6 +167,32 @@ impl PbrArgs {
         }
         if let Some(sp) = self.specular {
             m.specular = sp;
+        }
+        if let Some(sh) = &self.shader {
+            m.shader = match sh {
+                None => None,
+                Some(a) => {
+                    if !valid_shader_name(&a.name) {
+                        bail!("shader name '{}' must be letters, digits, '_' or '-'", a.name);
+                    }
+                    if a.params.len() > bevy_polly::MAX_PARAMS {
+                        bail!("at most {} shader params", bevy_polly::MAX_PARAMS);
+                    }
+                    let mut params = std::collections::BTreeMap::new();
+                    for (k, v) in &a.params {
+                        let v = match v {
+                            ParamValue::One(x) => vec![*x],
+                            ParamValue::Many(xs) if (1..=4).contains(&xs.len()) => xs.clone(),
+                            ParamValue::Many(_) => bail!("shader param '{k}' needs 1 to 4 numbers"),
+                        };
+                        params.insert(k.clone(), v);
+                    }
+                    if s.asset_dir.is_none() {
+                        notes.push("the scene has no asset directory yet: write_shader sets it (renders show the plain material until the shader file exists)".into());
+                    }
+                    Some(CustomShader { name: a.name.clone(), params })
+                }
+            };
         }
         for (slot, v) in slots {
             let Some(v) = v else { continue };
@@ -360,6 +409,9 @@ pub fn material_json(s: &Scene, id: u32) -> Value {
     }
     if let Some(c) = m.specular {
         j["specular"] = json!(c);
+    }
+    if let Some(c) = &m.shader {
+        j["shader"] = json!(c);
     }
     j
 }

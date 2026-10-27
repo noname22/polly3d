@@ -70,6 +70,17 @@ An object can belong to several variants of one slot (a blouse is in both `blous
 
 `parts` lists the hide rules that cover this node's faces.
 
+### On a material with a custom shader
+
+```json
+"extras": { "polly": { "shader": { "name": "toon", "params": { "bands": [3], "tint": [1, 0.8, 0.6, 1] } } } }
+```
+
+The material is a normal glTF PBR material; `shader` names a fragment shader
+(`shaders/<name>.wesl` in the game's assets) that runs on top of it. Each
+parameter is 1–4 numbers. The `bevy_polly` crate turns these into
+`PollyMaterial`s; see [bevy.md](bevy.md#custom-shaders).
+
 ### On the scene (`scenes[0].extras`)
 
 ```json
