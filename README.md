@@ -51,8 +51,9 @@ claude mcp add polly -- /path/to/polly3d/target/release/polly
 ```
 
 Logs go to stderr (`RUST_LOG=polly=debug`), because stdout carries the MCP
-protocol. Set `POLLY_ADAPTER=software` to force the software (llvmpipe)
-renderer.
+protocol. Rendering is done by one headless Bevy app running on a background
+thread; it never opens a window, and the viewer only displays its images. Set
+`POLLY_ADAPTER=software` to force the software (llvmpipe) adapter.
 
 ## Crates
 
@@ -61,7 +62,8 @@ renderer.
 | `polly-core` | n-gon mesh with stable ids, primitives, modelling ops (extrude, inset, bevel, loop cut, subdivide, dissolve, bridge, mirror…), selection queries, scene, undo history, skeletons, skinning, morphs, clips |
 | `polly-uv` | seams, projections, LSCM unwrap, pixel-snapped packing, UV reports |
 | `polly-paint` | palettes, crisp pixel drawing, ordered dithering, procedural fills (bricks, planks, noise…), face fills, quantize |
-| `polly-render` | wgpu offscreen renderer, ID-labelled overlays, contact sheets, CPU picking, UV layout view |
+| `polly-render` | CPU render helpers: cameras and framing, picking, overlay line lists, ID labels and legend, contact sheets, UV layout view |
+| `polly-bevy` | the renderer: a headless Bevy app on a worker thread (`StandardMaterial` shading, overlay lines, readback), shared by the agent's renders and the viewer |
 | `polly-export` | GLB export (textures, sampler filter, skins, morph targets, animations), `.polly` project files |
 | `polly-mcp` | MCP tool layer (rmcp) |
 | `polly` | binary: stdio server + optional egui viewer |
@@ -140,9 +142,9 @@ maps are linear data: `create_texture` with `kind: "normal"` or `"data"` makes
 one (and `slot` wires it into a material), `import_texture` takes `linear`, and
 a texture placed in a data slot becomes linear. Textures can be up to 4096 px
 per side. Export writes every channel and the matching `KHR_materials_*`
-extensions, and adds MikkTSpace tangents to normal-mapped meshes. Renders show
-base colour and emissive for now; the full PBR view arrives with the Bevy
-renderer.
+extensions, and adds MikkTSpace tangents to normal-mapped meshes. Renders use
+Bevy's `StandardMaterial`, so every channel shows up in the agent's images and
+the viewer just as it will in the game.
 
 ## Reference images
 

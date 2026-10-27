@@ -1,8 +1,7 @@
-//! Builds GPU line / point instances for overlays (wireframe, selection, grid, ...).
+//! Builds line / point instances for overlays (wireframe, selection, grid, ...).
 
 use std::collections::BTreeSet;
 
-use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use polly_core::mesh::Edge;
 use polly_core::scene::Scene;
@@ -10,9 +9,9 @@ use polly_core::scene::Scene;
 use crate::options::Overlays;
 use crate::prep::{Prepared, world_bounds};
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub(crate) struct LineInst {
+/// One overlay line (or a point when `a == b` and `params[1] == 1`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineInst {
     pub a: [f32; 3],
     pub b: [f32; 3],
     pub color: [f32; 4],
@@ -20,7 +19,7 @@ pub(crate) struct LineInst {
     pub params: [f32; 4],
 }
 
-pub(crate) fn srgb_to_linear(c: f32) -> f32 {
+pub fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 

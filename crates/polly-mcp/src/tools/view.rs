@@ -481,7 +481,7 @@ pub fn maybe_preview(ctx: &mut Ctx, object: ObjectId, out: Out) -> Result<Out> {
     let Some(size) = ctx.services.settings.lock().unwrap().auto_preview else { return Ok(out) };
     let o = RenderOptions { focus: Some(vec![object]), ..RenderOptions::default().with_size(size, size) };
     let shown = polly_core::variants::display(&ctx.doc.scene, &[], &BTreeMap::new());
-    match ctx.services.renderer().and_then(|mut r| r.render(&shown, &o)) {
+    match ctx.services.renderer().and_then(|r| r.render(&shown, &o)) {
         Ok(r) => {
             *ctx.last_view = Some(LastView { camera: r.camera.clone(), tiles: vec![], plays: vec![], variants: BTreeMap::new() });
             Ok(out.with_image(png(&r.image)?))

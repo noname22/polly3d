@@ -230,7 +230,7 @@ fn render_variants(ctx: &mut Ctx, a: RenderVariants) -> Result<Out> {
     let rows = (names.len() as u32).div_ceil(cols);
     let gap = 4;
     let mut img = image::RgbaImage::from_pixel(cols * tile + gap * (cols + 1), rows * tile + gap * (rows + 1), image::Rgba([18, 19, 23, 255]));
-    let mut renderer = ctx.services.renderer()?;
+    let renderer = ctx.services.renderer()?;
     for (i, v) in names.iter().enumerate() {
         let mut c = base.clone();
         c.insert(a.slot.clone(), v.clone());

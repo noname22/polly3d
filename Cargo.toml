@@ -14,6 +14,7 @@ polly-paint = { path = "crates/polly-paint" }
 polly-render = { path = "crates/polly-render" }
 polly-export = { path = "crates/polly-export" }
 polly-mcp = { path = "crates/polly-mcp" }
+polly-bevy = { path = "crates/polly-bevy" }
 
 anyhow = "1.0.104"
 thiserror = "2"
@@ -37,4 +38,11 @@ faer = "0.24.4"
 gltf-json = "1.4.1"
 gltf = "1.4.1"
 tracing = "0.1"
+# Headless renderer only: no winit, audio, UI or text.
+bevy = { version = "0.20.0", default-features = false, features = [
+    "std", "multi_threaded", "async_executor",
+    "bevy_asset", "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_mesh", "bevy_image",
+    "bevy_camera", "bevy_light", "bevy_color", "bevy_shader", "bevy_material", "bevy_window",
+    "bevy_mikktspace",
+] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

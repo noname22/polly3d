@@ -8,7 +8,7 @@ use polly_core::scene::Scene;
 
 use crate::camera::CameraInfo;
 use crate::canvas::{self, Rect, Rgba, WHITE};
-use crate::gpu::Frame;
+use crate::frame::Frame;
 use crate::options::RenderOptions;
 
 pub const MAX_LABELS: usize = 300;

@@ -1,0 +1,16 @@
+[package]
+name = "polly-bevy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+polly-core.workspace = true
+polly-render.workspace = true
+bevy.workspace = true
+anyhow.workspace = true
+image.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

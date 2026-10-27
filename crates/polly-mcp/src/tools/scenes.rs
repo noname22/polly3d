@@ -93,8 +93,8 @@ fn render_overview(ctx: &mut Ctx, a: Overview) -> Result<Out> {
     }
     let cols = (snaps.len() as f32).sqrt().ceil() as u32;
     let tile = a.tile_size.unwrap_or(256).clamp(96, 512).min(2048 / cols);
-    let mut renderer = ctx.services.renderer()?;
-    let (img, rects) = render_grid(&mut renderer, &ctx.services.tiles, &snaps, cols, tile, None)?;
+    let renderer = ctx.services.renderer()?;
+    let (img, rects) = render_grid(&renderer, &ctx.services.tiles, &snaps, cols, tile, None)?;
     drop(renderer);
     let mut j = json!({"tiles": rects, "size": [img.width(), img.height()]});
     if !busy.is_empty() {

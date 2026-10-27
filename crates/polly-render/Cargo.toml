@@ -6,9 +6,6 @@ edition.workspace = true
 [dependencies]
 polly-core.workspace = true
 glam.workspace = true
-wgpu.workspace = true
-bytemuck.workspace = true
-pollster.workspace = true
 image.workspace = true
 serde.workspace = true
 schemars.workspace = true

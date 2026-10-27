@@ -1,11 +1,12 @@
 //! Process-wide services shared by tool handlers and all scenes (renderer,
 //! settings, viewer control).
 
-use std::sync::{Mutex, MutexGuard, mpsc};
+use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use polly_render::{Renderer, Tile};
+use polly_bevy::BevyRenderer;
+use polly_render::Tile;
 
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
@@ -38,7 +39,6 @@ pub type ViewerControl = Box<dyn Fn(ViewerCommand) -> Result<()> + Send + Sync>;
 #[derive(Default)]
 pub struct Services {
     pub settings: Mutex<Settings>,
-    renderer: Mutex<Option<Renderer>>,
     /// Overview tiles shared by render_overview and the viewer.
     pub tiles: crate::overview::TileCache,
     viewer: Mutex<Option<ViewerControl>>,
@@ -64,27 +64,8 @@ impl Services {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    /// The renderer, created on first use.
-    pub fn renderer(&self) -> Result<RendererGuard<'_>> {
-        let mut g = self.renderer.lock().unwrap_or_else(|e| e.into_inner());
-        if g.is_none() {
-            *g = Some(Renderer::headless().context("no GPU adapter available for rendering (try POLLY_ADAPTER=software)")?);
-        }
-        Ok(RendererGuard(g))
-    }
-}
-
-pub struct RendererGuard<'a>(MutexGuard<'a, Option<Renderer>>);
-
-impl std::ops::Deref for RendererGuard<'_> {
-    type Target = Renderer;
-    fn deref(&self) -> &Renderer {
-        self.0.as_ref().unwrap()
-    }
-}
-
-impl std::ops::DerefMut for RendererGuard<'_> {
-    fn deref_mut(&mut self) -> &mut Renderer {
-        self.0.as_mut().unwrap()
+    /// The renderer (the process-wide Bevy render service, started on first use).
+    pub fn renderer(&self) -> Result<BevyRenderer> {
+        BevyRenderer::global().context("no GPU adapter available for rendering (try POLLY_ADAPTER=software)")
     }
 }

@@ -224,7 +224,7 @@ impl RenderOptions {
         self.height = h;
         self
     }
-    pub(crate) fn clamped_size(&self) -> [u32; 2] {
+    pub fn clamped_size(&self) -> [u32; 2] {
         [self.width.clamp(64, 2048), self.height.clamp(64, 2048)]
     }
 }

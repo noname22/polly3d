@@ -4,8 +4,8 @@
 //!
 //! With several scenes the window starts on an overview of thumbnails;
 //! clicking one opens that scene alone, and "< Back" (or Backspace/Esc)
-//! returns. The single-scene view renders straight into a GPU texture that
-//! egui displays, so orbiting never reads pixels back to the CPU.
+//! returns. Scenes are rendered by the shared Bevy render service (the same
+//! one the agent's renders use) and shown as egui textures.
 //!
 //! Single-scene view: left-drag orbits, wheel zooms. Keys: 1 front, 2 right,
 //! 3 top, 4 persp, W wireframe, G grid, S selection, F cycle texture filter
@@ -24,7 +24,7 @@ use crate::anim_panel::{self, AnimState};
 use polly_mcp::overview::{layout, tile_options};
 use polly_mcp::services::ViewerCommand;
 use polly_mcp::workspace::{MAIN, Snapshot, Workspace};
-use polly_render::{Overlays, RenderOptions, View, wgpu};
+use polly_render::{Overlays, RenderOptions, View};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
@@ -34,10 +34,6 @@ use winit::window::{Window, WindowId};
 
 /// How long a frame may wait for a scene that a tool call is busy with.
 const SCENE_WAIT: Duration = Duration::from_millis(20);
-/// Format of the 3-D viewport texture egui samples. egui treats sampled
-/// texels as gamma-encoded, so this is a non-sRGB format: the renderer
-/// encodes sRGB in its shader for such targets.
-const VIEWPORT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// `OwnedDisplayHandle` with the `Debug` impl wgpu wants.
 struct Display(OwnedDisplayHandle);
@@ -138,19 +134,15 @@ impl ViewState {
     }
 }
 
-struct Viewport {
-    size: [u32; 2],
-    view: wgpu::TextureView,
-    id: egui::TextureId,
-}
-
 /// GPU resources the UI code needs while egui builds a frame.
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    scene: polly_render::Renderer,
+    /// The process-wide Bevy render service.
+    scene: polly_bevy::BevyRenderer,
     painter: egui_wgpu::Renderer,
-    viewport: Option<Viewport>,
+    /// The last rendered single-scene view.
+    viewport: Option<egui::TextureHandle>,
     /// Scene thumbnails: name -> (scene version, size, texture).
     thumbs: HashMap<String, (u64, u32, egui::TextureHandle)>,
 }
@@ -202,7 +194,7 @@ impl App {
         config.format = egui_wgpu::preferred_framebuffer_format(&surface.get_capabilities(&adapter).formats)?;
         surface.configure(&device, &config);
         let painter = egui_wgpu::Renderer::new(&device, config.format, egui_wgpu::RendererOptions::default());
-        let scene = polly_render::Renderer::new(&self.instance, &adapter, device.clone(), queue.clone());
+        let scene = polly_bevy::BevyRenderer::global()?;
         let egui = egui::Context::default();
         let state = egui_winit::State::new(egui.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None);
         self.gfx = Some(Gfx {
@@ -780,11 +772,10 @@ fn single(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, shown: Option<
     let Some(scene) = shown else {
         // Busy: keep showing the previous frame.
         if let Some(vp) = &gpu.viewport {
-            ui.painter().image(vp.id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+            ui.painter().image(vp.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
         }
         return Ok(false);
     };
-    let (target, id) = viewport(gpu, size);
     let opts = RenderOptions {
         view: view.cam.view(),
         width: size[0],
@@ -796,7 +787,13 @@ fn single(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, shown: Option<
         frame_bounds,
         ..RenderOptions::default()
     };
-    gpu.scene.render_to_view(scene, &opts, &target, VIEWPORT_FORMAT, size)?;
+    let img = gpu.scene.render_sized(scene, &opts, size)?.image;
+    let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+    match &mut gpu.viewport {
+        Some(t) => t.set(color, egui::TextureOptions::NEAREST),
+        None => gpu.viewport = Some(ui.ctx().load_texture("viewport", color, egui::TextureOptions::NEAREST)),
+    }
+    let id = gpu.viewport.as_ref().unwrap().id();
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     ui.painter().image(id, rect, uv, egui::Color32::WHITE);
     ui.painter().text(
@@ -814,33 +811,6 @@ fn single(ui: &mut egui::Ui, view: &mut ViewState, gpu: &mut Gpu, shown: Option<
         egui::Color32::from_gray(150),
     );
     Ok(true)
-}
-
-/// The viewport texture, (re)created at `size` and registered with egui.
-fn viewport(gpu: &mut Gpu, size: [u32; 2]) -> (wgpu::TextureView, egui::TextureId) {
-    if gpu.viewport.as_ref().is_none_or(|v| v.size != size) {
-        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("viewport"),
-            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: VIEWPORT_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let id = match gpu.viewport.take() {
-            Some(old) => {
-                gpu.painter.update_egui_texture_from_wgpu_texture(&gpu.device, &view, wgpu::FilterMode::Nearest, old.id);
-                old.id
-            }
-            None => gpu.painter.register_native_texture(&gpu.device, &view, wgpu::FilterMode::Nearest),
-        };
-        gpu.viewport = Some(Viewport { size, view, id });
-    }
-    let vp = gpu.viewport.as_ref().unwrap();
-    (vp.view.clone(), vp.id)
 }
 
 impl ApplicationHandler<ViewerCommand> for App {

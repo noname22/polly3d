@@ -1507,10 +1507,9 @@ fn pbr_materials() {
     assert!(mat["extensions"]["KHR_materials_clearcoat"].is_object());
     assert!(j["meshes"][0]["primitives"][0]["attributes"]["TANGENT"].is_number());
 
-    // The render shows the emissive glow (orange added to blue) and says PBR channels are not shown yet.
+    // The render shows the emissive glow (orange added to blue).
     let r = s.call("render", json!({"view": "front", "overlays": {"wireframe": false, "grid": false}, "legend": false}));
     if r.is_error != Some(true) {
-        assert!(text(&r).contains("PBR channels not shown"), "{}", text(&r));
         std::fs::write(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("session_pbr.png"), &images(&r)[0]).unwrap();
         let img = image::load_from_memory(&images(&r)[0]).unwrap().to_rgba8();
         let p = img.get_pixel(256, 256);

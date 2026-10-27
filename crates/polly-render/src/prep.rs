@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::camera::CameraInfo;
 
-pub(crate) struct PreparedObject {
+pub struct PreparedObject {
     pub id: ObjectId,
     pub name: String,
     pub mesh: Arc<Mesh>,
@@ -47,7 +47,7 @@ impl PreparedObject {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Tri {
+pub struct Tri {
     pub obj: usize,
     pub face: FaceId,
     pub p: [Vec3; 3],
@@ -56,12 +56,12 @@ pub(crate) struct Tri {
     pub two_sided: bool,
 }
 
-pub(crate) struct Prepared {
+pub struct Prepared {
     pub objects: Vec<PreparedObject>,
     pub tris: Vec<Tri>,
 }
 
-pub(crate) fn world_bounds(objs: &[&PreparedObject]) -> Option<(Vec3, Vec3)> {
+pub fn world_bounds(objs: &[&PreparedObject]) -> Option<(Vec3, Vec3)> {
     objs.iter().filter_map(|o| o.bounds()).reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
 }
 

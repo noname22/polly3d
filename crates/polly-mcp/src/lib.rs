@@ -61,7 +61,7 @@ Workflow that works well
 Materials
 - Retro: color + a small nearest-filtered texture (+ unlit). Modern PBR (exported as glTF metallic-roughness, read by Bevy, Godot, Blender): metallic, roughness, normal_texture (+ normal_scale), occlusion_texture, metallic_roughness_texture (G = roughness, B = metallic; may be the same texture as occlusion), emissive + emissive_strength (+ emissive_texture), blend (soft transparency; not with alpha_cutoff), and clearcoat / anisotropy / transmission / specular objects. update_material changes only given fields; "" or null removes one.
 - Data maps are linear, not colours: create_texture kind "normal" (flat (128,128,255) normal map) or kind "data" (metallic-roughness, occlusion); `material` + `slot` wires it in. Textures go up to 4096 px, but painting a large one copies it into undo. render_uv_layout `slot` shows a slot's texture.
-- Renders show base colour and emissive only for now (a note says so); the exported file carries every channel.
+- Renders use the same PBR shading as Bevy (StandardMaterial), so what you see is what the game shows.
 
 Rigging & animation (optional)
 - Rig: add_bone / add_bone_chain (head/tail points in object space), check with render overlays {"bones":true,"bone_names":true}.

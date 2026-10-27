@@ -1,11 +1,12 @@
-//! Render a gallery of example images: `cargo run -p polly-render --example gallery -- <out_dir>`.
+//! Render a gallery of example images: `cargo run -p polly-bevy --example gallery -- <out_dir>`.
 
-use glam::{Quat, Vec2, Vec3, Vec4};
+use polly_core::glam::{Quat, Vec2, Vec3, Vec4};
 use polly_core::ids::Selection;
 use polly_core::mesh::{Edge, Mesh};
 use polly_core::primitives::Primitive;
 use polly_core::scene::{Material, Scene, Texture};
-use polly_render::{Overlays, RenderOptions, Renderer, View, render_uv_layout};
+use polly_bevy::BevyRenderer;
+use polly_render::{Overlays, RenderOptions, View, render_uv_layout};
 
 fn box_uvs(m: &mut Mesh) {
     for f in m.faces.values_mut() {
@@ -45,8 +46,8 @@ fn crate_texture() -> Texture {
 fn main() -> anyhow::Result<()> {
     let out = std::env::args().nth(1).unwrap_or_else(|| "gallery".into());
     std::fs::create_dir_all(&out)?;
-    let mut r = Renderer::headless()?;
-    eprintln!("adapter: {:?}", r.adapter_info());
+    let r = BevyRenderer::global()?;
+    eprintln!("adapter: {}", r.adapter_name());
 
     let mut scene = Scene::default();
     let red = scene.add_material(Material::new("red", [0.8, 0.15, 0.1, 1.0]));

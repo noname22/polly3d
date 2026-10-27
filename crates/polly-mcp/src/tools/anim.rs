@@ -1489,7 +1489,7 @@ fn render_animation(ctx: &mut Ctx, a: RenderAnim) -> Result<Out> {
     let rows = (frames.len() as u32).div_ceil(cols);
     let gap = 4;
     let mut img = image::RgbaImage::from_pixel(cols * tile + gap * (cols + 1), rows * tile + gap * (rows + 1), image::Rgba([18, 19, 23, 255]));
-    let mut renderer = ctx.services.renderer()?;
+    let renderer = ctx.services.renderer()?;
     for (i, f) in frames.iter().enumerate() {
         let args: Vec<PlayArg> = a.clips.iter().map(|p| PlayArg { frame: *f, ..p.clone() }).collect();
         let posed = polly_core::variants::display(s, &plays(s, &args)?, &choice);

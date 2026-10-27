@@ -7,7 +7,8 @@ use std::sync::Mutex;
 use anyhow::Result;
 use image::RgbaImage;
 use polly_render::canvas::{self, Rect};
-use polly_render::{Overlays, RenderOptions, Renderer, View};
+use polly_bevy::BevyRenderer;
+use polly_render::{Overlays, RenderOptions, View};
 use serde::Serialize;
 
 use crate::workspace::Snapshot;
@@ -62,7 +63,7 @@ pub fn layout(n: usize, width: u32, height: u32) -> (u32, u32) {
 
 /// Render `scenes` as a grid of `tile`-sized squares with `cols` columns.
 pub fn render_grid(
-    renderer: &mut Renderer,
+    renderer: &BevyRenderer,
     cache: &TileCache,
     scenes: &[Snapshot],
     cols: u32,
